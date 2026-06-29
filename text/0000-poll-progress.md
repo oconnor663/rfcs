@@ -1,4 +1,4 @@
-- Feature Name: (fill me in with a unique ident, `my_awesome_feature`)
+- Feature Name: `poll_progress`
 - Start Date: (fill me in with today's date, YYYY-MM-DD)
 - RFC PR: [rust-lang/rfcs#0000](https://github.com/rust-lang/rfcs/pull/0000)
 - Rust Issue: [rust-lang/rust#0000](https://github.com/rust-lang/rust/issues/0000)
@@ -6,18 +6,87 @@
 ## Summary
 [summary]: #summary
 
-One paragraph explanation of the feature.
+Add a required `poll_progress` method to the `AsyncIterator` trait, and make
+`for await` loops call this method whenever an `.await` in their loop body is
+`Pending`. Expand the documented `AsyncIterator` contract to require async
+iterator combinators to do the same.
 
 ## Motivation
 [motivation]: #motivation
 
-Any changes to Rust should focus on solving a problem that users of Rust are having.
-This section should explain this problem in detail, including necessary background.
+Since the [`AsyncIterator`] trait is still unstable, iteration in the async
+ecosystem today is organized around the [`Stream`] trait from the `futures`
+crate. Apart from the name, the two traits currently have the same shape:
 
-It should also contain several specific use cases where this feature can help a user, and explain how it helps.
-This can then be used to guide the design of the feature.
+[`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
+[`Stream`]: https://docs.rs/futures/latest/futures/prelude/trait.Stream.html
 
-This section is one of the most important sections of any RFC, and can be lengthy.
+```rs
+pub trait AsyncIterator { // or `pub trait Stream`
+    type Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>>;
+
+    fn size_hint(&self) -> (usize, Option<usize>) { ... }
+}
+```
+
+In this interface, all the work an iterator does is driven through `poll_next`.
+Consider how that interacts with a `for await` loop:
+
+```rs
+for await item in my_iter {
+    do_work(item).await;
+}
+```
+
+When control is at the top, the `for await` loop calls `my_iter.poll_next`
+until it either yields an item (`Ready(Some(_))` or indicates that it's done
+(`Ready(None)`). Once control moves into `do_work`, the loop stops driving
+`my_iter`. That applies necessary "backpressure" to the iterator, so it's
+mostly by design. But it can be a problem if `my_iter` wraps multiple
+concurrent futures or other iterators internally, because suspending some of
+those at arbitrary `.await` points isn't generally correct. Here's an example
+where that causes a deadlock that looks like it should be impossible in a
+straight-line reading of the code:
+
+```rs
+use futures::stream::FuturesUnordered;
+use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep};
+
+async fn foo() {
+    static LOCK: Mutex<()> = Mutex::const_new(());
+    let _guard = LOCK.lock().await;
+    sleep(Duration::from_millis(10)).await;
+}
+
+#[tokio::main]
+async fn main() {
+    let futures = FuturesUnordered::new();
+    futures.push(foo());
+    futures.push(foo());
+    for await _ in futures {
+        foo().await; // Deadlock!
+    }
+}
+```
+
+`FuturesUnordered` doesn't implement `AsyncIterator` today, so this example
+doesn't compile as written, but you can run it on stable by [replacing `for
+await` with `for_each`][for_each]. When control enters the loop body, one of
+the `foo` futures remains in the `FuturesUnordered` buffer, suspended at the
+point where it's tried to acquire `LOCK` and taken a spot in its waiters queue.
+The call to `foo` in the body tries acquire `LOCK` again, but the waiter at the
+front of the queue never again makes progress, so it's deadlocked.
+
+[for_each]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=ceccac95773cbba8aeddf162b5793a3f
+
+To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
+latencies, concurrent async iterators like `FuturesUnordered` need to
+continuously drive futures they contain. That means that `for await` and other
+combinators need a way to drive async iterators even when they're not yet ready
+to accept another item.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
