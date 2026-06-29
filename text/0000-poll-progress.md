@@ -6,19 +6,20 @@
 ## Summary
 [summary]: #summary
 
-Add a required `poll_progress` method to the `AsyncIterator` trait, and make
+Add a required `poll_progress` method to the [`AsyncIterator`] trait, and make
 `for await` loops call this method whenever an `.await` in their loop body is
 `Pending`. Expand the documented `AsyncIterator` contract to require async
 iterator combinators to do the same.
 
+[`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
+
 ## Motivation
 [motivation]: #motivation
 
-Since the [`AsyncIterator`] trait is still unstable, iteration in the async
+Since the `AsyncIterator` trait is still unstable, iteration in the async
 ecosystem today is organized around the [`Stream`] trait from the `futures`
 crate. Apart from the name, the two traits currently have the same shape:
 
-[`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
 [`Stream`]: https://docs.rs/futures/latest/futures/prelude/trait.Stream.html
 
 ```rs
@@ -32,7 +33,7 @@ pub trait AsyncIterator { // or `pub trait Stream`
 ```
 
 In this interface, all the work an iterator does is driven through `poll_next`.
-Consider how that interacts with a `for await` loop:
+Consider how that works in the context of a `for await` loop:
 
 ```rs
 for await item in my_iter {
@@ -41,14 +42,14 @@ for await item in my_iter {
 ```
 
 When control is at the top, the `for await` loop calls `my_iter.poll_next`
-until it either yields an item (`Ready(Some(_))` or indicates that it's done
-(`Ready(None)`). Once control moves into `do_work`, the loop stops driving
-`my_iter`. That applies necessary "backpressure" to the iterator, so it's
-mostly by design. But it can be a problem if `my_iter` wraps multiple
-concurrent futures or other iterators internally, because suspending some of
-those at arbitrary `.await` points isn't generally correct. Here's an example
-where that causes a deadlock that looks like it should be impossible in a
-straight-line reading of the code:
+until it either yields an item with `Ready(Some(_))` or indicates that it's
+done with `Ready(None)`. Once control moves into `do_work`, the loop stops
+driving `my_iter` entirely. That applies necessary "backpressure" to the
+iterator, so it's mostly by design. But it can be a problem if `my_iter` wraps
+multiple concurrent futures or other iterators internally, because suspending
+some of those at arbitrary `.await` points isn't generally correct. Here's an
+example where that causes a deadlock that looks like it should be impossible in
+a straight-line reading of the code:
 
 ```rs
 use futures::stream::FuturesUnordered;
@@ -72,7 +73,7 @@ async fn main() {
 }
 ```
 
-`FuturesUnordered` doesn't implement `AsyncIterator` today, so this example
+[`FuturesUnordered`] doesn't implement `AsyncIterator` today, so this example
 doesn't compile as written, but you can run it on stable by [replacing `for
 await` with `for_each`][for_each]. When control enters the loop body, one of
 the `foo` futures remains in the `FuturesUnordered` buffer, suspended at the
@@ -80,13 +81,14 @@ point where it's tried to acquire `LOCK` and taken a spot in its waiters queue.
 The call to `foo` in the body tries acquire `LOCK` again, but the waiter at the
 front of the queue never again makes progress, so it's deadlocked.
 
+[`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [for_each]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=ceccac95773cbba8aeddf162b5793a3f
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like `FuturesUnordered` need to
-continuously drive futures they contain. That means that `for await` and other
-combinators need a way to drive async iterators even when they're not yet ready
-to accept another item.
+continuously drive the futures they contain. That means that `for await` and
+other combinators need a way to let an iterator make progress, even when
+they're not ready to accept another item. `poll_progress` fills this gap.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -126,7 +128,9 @@ B woke up` after one second, while the loop body is in the middle of its own
 two-second sleep. The output of the second `foo` future is buffered, and once
 the two-second sleep is finished, we loop around and print `got B` immediately.
 
-### How `tokio_stream::StreamExt::merge` might document its behavior
+### How [`tokio_stream::StreamExt::merge`] might document its behavior
+
+[`tokio_stream::StreamExt::merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 
 Combine two streams into one by interleaving the output of both as it is
 produced. When one side of the merge yields an item, the other side continues
