@@ -126,16 +126,36 @@ B woke up` after one second, while the loop body is in the middle of its own
 two-second sleep. The output of the second `foo` future is buffered, and once
 the two-second sleep is finished, we loop around and print `got B` immediately.
 
-Explain the proposal as if it was already included in the language and you were teaching it to another Rust programmer. That generally means:
+### How `tokio_stream::StreamExt::merge` might document its behavior
 
-- Introducing new named concepts.
-- Explaining the feature largely in terms of examples.
-- Explaining how Rust programmers should *think* about the feature, and how it should impact the way they use Rust. It should explain the impact as concretely as possible.
-- If applicable, provide sample error messages, deprecation warnings, or migration guidance.
-- If applicable, describe the differences between teaching this to existing Rust programmers and new Rust programmers.
-- Discuss how this impacts the ability to read, understand, and maintain Rust code. Code is read and modified far more often than written; will the proposed feature make code easier to maintain?
+Combine two streams into one by interleaving the output of both as it is
+produced. When one side of the merge yields an item, the other side continues
+making progress in the background until it also yields an item. For example:
 
-For implementation-oriented RFCs (e.g. for compiler internals), this section should focus on how compiler contributors should think about the change, and give examples of its concrete impact. For policy RFCs, this section should provide an example-driven introduction to the policy, and explain its impact in concrete terms.
+```rs
+use futures::stream::once;
+use tokio::time::{Duration, sleep};
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() {
+    let stream_a = once(async { "A" });
+    let stream_b = once(async {
+        sleep(Duration::from_secs(1)).await;
+        println!("stream_b woke up");
+        "B"
+    });
+    for await item in stream_a.merge(stream_b) {
+        println!("got {item}");
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+```
+
+Here we see `got A` immediately, and then the loop body starts its two-second
+sleep. The other stream continues in the meantime, so we see `stream_b woke up`
+after one second, and the item `"B"` is buffered. When the two-second sleep is
+finished, we loop aroud and print `got B` immediately.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
