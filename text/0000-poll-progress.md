@@ -91,6 +91,41 @@ to accept another item.
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
+### How `FuturesUnordered` might document its behavior
+
+`FuturesUnordered` is an async iterator over the results of the futures it
+contains. Looping over it gives you each of the results as they arrive, and
+pending futures keep making progress concurrently with the loop body. For
+example:
+
+```rs
+use futures::stream::FuturesUnordered;
+use tokio::time::{Duration, sleep};
+
+async fn foo(secs: u64, message: &str) -> &str {
+    sleep(Duration::from_secs(secs)).await;
+    println!("foo {message} woke up");
+    message
+}
+
+#[tokio::main]
+async fn main() {
+    let futures = FuturesUnordered::new();
+    futures.push(Box::pin(foo(0, "A")));
+    futures.push(Box::pin(foo(1, "B")));
+    for await message in futures {
+        println!("got {message}");
+        sleep(Duration::from_secs(2)).await;
+    }
+}
+```
+
+The first `foo` future does a zero-length sleep, so we see `foo A woke up` and
+`got A` immediately. The second `foo` future runs concurrently, so we see `foo
+B woke up` after one second, while the loop body is in the middle of its own
+two-second sleep. The output of the second `foo` future is buffered, and once
+the two-second sleep is finished, we loop around and print `got B` immediately.
+
 Explain the proposal as if it was already included in the language and you were teaching it to another Rust programmer. That generally means:
 
 - Introducing new named concepts.
