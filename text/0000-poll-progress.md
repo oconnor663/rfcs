@@ -78,8 +78,8 @@ doesn't compile as written, but you can run it on stable by [replacing `for
 await` with `for_each`][for_each]. When control enters the loop body, one of
 the `foo` futures remains in the `FuturesUnordered` buffer, suspended at the
 point where it's tried to acquire `LOCK` and taken a spot in its waiters queue.
-The call to `foo` in the body tries acquire `LOCK` again, but the waiter at the
-front of the queue never again makes progress, so it's deadlocked.
+The call to `foo` in the body tries to acquire `LOCK` again, but the waiter at
+the front of the queue never again makes progress, so it's deadlocked.
 
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [for_each]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=ceccac95773cbba8aeddf162b5793a3f
@@ -159,9 +159,9 @@ async fn main() {
 Here we see `got A` immediately, and then the loop body starts its two-second
 sleep. The other stream continues in the meantime, so we see `stream_b woke up`
 after one second, and the item `"B"` is buffered. When the two-second sleep is
-finished, we loop aroud and print `got B` immediately.
+finished, we loop around and print `got B` immediately.
 
-### `AsyncIterator`
+### `AsyncIterator` API docs
 
 #### `poll_next`
 
@@ -170,8 +170,8 @@ finished, we loop aroud and print `got B` immediately.
 - `Poll::Ready(Some(val))` means that the async iterator has successfully
   produced a value, `val`, and may produce further values on subsequent
   `poll_next` calls. In this case **the caller must arrange to call either
-  `poll_next` or `poll_progress` again promptly.** (If the caller is another
-  `poll_next` method, it can trust its own caller to arrange this.)
+  `poll_next` or `poll_progress` again promptly.** If the caller is another
+  `poll_next` method, it can trust its own caller to arrange this.
 
 - `Poll::Ready(None)` means that the async iterator has terminated, and neither
   `poll_next` nor `poll_progress` should be invoked again.
@@ -202,6 +202,100 @@ trait places no requirements on the effects of such a call. However, as the
 `poll_progress` method is not marked `unsafe`, Rust's usual rules apply: calls
 must never cause undefined behavior (memory corruption, incorrect use of
 `unsafe` functions, or the like), regardless of the async iterator's state.
+
+### Examples that might appear in "How to implement `AsyncIterator`"
+
+`Once` is an adapter that converts a `Future` into an `AsyncIterator` of one
+element. Its implementation might look like this:
+
+```rs
+pub struct Once<Fut> {
+    future: Option<Pin<Box<Fut>>>,
+}
+
+impl<Fut: Future> AsyncIterator for Once<Fut> {
+    type Item = Fut::Output;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if let Some(fut) = &mut self.future {
+            if let Poll::Ready(item) = fut.as_mut().poll(cx) {
+                self.future = None;
+                PollNext::Item(item)
+            } else {
+                PollNext::Pending
+            }
+        } else {
+            PollNext::Done
+        }
+    }
+
+    fn poll_progress(self: Pin<&mut Self>, _: &mut Context) -> Poll<()> {
+        assert!(self.future.is_none(), "only called after yielding an item");
+        Poll::Ready(())
+    }
+}
+```
+
+Note the `assert!` in `poll_progress`. Because `poll_progress` can only be
+called after `poll_next` yields an item, we know that `self.future` should
+already have been dropped, and `poll_progress` never needs to poll it. For the
+same reason, the `Once` struct doesn't need space to buffer an item.
+
+`MergeAll` is similar to `Once`, but it drives many futures instead of just
+one, and it iterates over all their outputs as they come. In other words, it's
+the iterator version of the future combinator `JoinAll`. Its implementation
+might look like this:
+
+```rs
+pub struct MergeAll<Fut: Future> {
+    futures: Vec<Pin<Box<Fut>>>,
+    items: VecDeque<Fut::Output>,
+}
+
+impl<Fut: Future> AsyncIterator for MergeAll<Fut> {
+    type Item = Fut::Output;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        // If we've buffered any items, yield one of those.
+        if let Some(item) = self.items.pop_front() {
+            return PollNext::Item(item);
+        }
+        // Poll the remaining futures and yield the first item we get.
+        for i in 0..self.futures.len() {
+            if let Poll::Ready(item) = self.futures[i].as_mut().poll(cx) {
+                self.futures.swap_remove(i);
+                return PollNext::Item(item);
+            }
+        }
+        if self.futures.is_empty() {
+            PollNext::Done
+        } else {
+            PollNext::Pending
+        }
+    }
+
+    fn poll_progress(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+        let MergeAll { futures, items } = &mut *self;
+        // Poll the remaining futures and buffer all the items we get.
+        futures.retain_mut(|fut| {
+            fut.as_mut()
+                .poll(cx)
+                .map(|item| items.push_back(item))
+                .is_pending()
+        });
+        if self.futures.is_empty() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+```
+
+Note that `poll_next` yields the first output it sees, without necessarily
+polling all the remaining futures. The caller is required to call either
+`poll_next` or `poll_progress` again promptly, so one way or another all the
+futures will get polled.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
