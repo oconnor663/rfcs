@@ -161,6 +161,48 @@ sleep. The other stream continues in the meantime, so we see `stream_b woke up`
 after one second, and the item `"B"` is buffered. When the two-second sleep is
 finished, we loop aroud and print `got B` immediately.
 
+### `AsyncIterator`
+
+#### `poll_next`
+
+- `Poll::Pending` means... \[no change\]
+
+- `Poll::Ready(Some(val))` means that the async iterator has successfully
+  produced a value, `val`, and may produce further values on subsequent
+  `poll_next` calls. In this case **the caller must arrange to call either
+  `poll_next` or `poll_progress` again promptly.** (If the caller is another
+  `poll_next` method, it can trust its own caller to arrange this.)
+
+- `Poll::Ready(None)` means that the async iterator has terminated, and neither
+  `poll_next` nor `poll_progress` should be invoked again.
+
+#### `poll_progress`
+
+Allows this async iterator to make progress internally, even though the next
+value is not yet needed.
+
+##### Return value
+
+- `Poll::Pending` means that more progress might be possible in the future.
+  Implementations will ensure that the current task will be notified when more
+  progress can be made.
+
+- `Poll::Ready(())` means that the async iterator has made as much internal
+  progress as it can, and `poll_progress` does not need to be invoked again
+  until the next time `poll_next` returns an item. Continuing to call
+  `poll_progress` is allowed but generally has no effect.
+
+##### Panics
+
+`poll_progress` **must not be called** after the most recent call to
+`poll_next` has returned `Pending` or after any call to `poll_next` has
+returned `Ready(None)`. Calling `poll_progress` in either of those cases may
+panic, block forever, or cause other kinds of problems; the `AsyncIterator`
+trait places no requirements on the effects of such a call. However, as the
+`poll_progress` method is not marked `unsafe`, Rust's usual rules apply: calls
+must never cause undefined behavior (memory corruption, incorrect use of
+`unsafe` functions, or the like), regardless of the async iterator's state.
+
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
 
