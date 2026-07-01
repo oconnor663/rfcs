@@ -8,8 +8,8 @@
 
 Add a required `poll_progress` method to the [`AsyncIterator`] trait, and make
 `for await` loops call this method whenever an `.await` in their loop body is
-`Pending`. Expand the documented `AsyncIterator` contract to require async
-iterator combinators to do the same.
+`Pending`. Expand the documented `AsyncIterator` contract to require
+combinators and consumers to do the same.
 
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
 
@@ -45,10 +45,10 @@ When control is at the top, the `for await` loop calls `my_iter.poll_next`
 until it either yields an item with `Ready(Some(_))` or indicates that it's
 done with `Ready(None)`. Once control moves into `do_work`, the loop stops
 driving `my_iter` entirely. That applies necessary "backpressure" to the
-iterator, so it's mostly by design. But it can be a problem if `my_iter` wraps
+iterator, and it's mostly by design. But it can be a problem if `my_iter` wraps
 multiple concurrent futures or other iterators internally, because suspending
 some of those at arbitrary `.await` points isn't generally correct. Here's an
-example where that causes a deadlock that looks like it should be impossible in
+example where this causes a deadlock that looks like it should be impossible in
 a straight-line reading of the code:
 
 ```rs
@@ -220,12 +220,12 @@ impl<Fut: Future> AsyncIterator for Once<Fut> {
         if let Some(fut) = &mut self.future {
             if let Poll::Ready(item) = fut.as_mut().poll(cx) {
                 self.future = None;
-                PollNext::Item(item)
+                Poll::Ready(Some(item))
             } else {
-                PollNext::Pending
+                Poll::Pending
             }
         } else {
-            PollNext::Done
+            Poll::Ready(None)
         }
     }
 
@@ -266,13 +266,13 @@ impl<Fut: Future> AsyncIterator for MergeAll<Fut> {
         for i in 0..self.futures.len() {
             if let Poll::Ready(item) = self.futures[i].as_mut().poll(cx) {
                 self.futures.swap_remove(i);
-                return PollNext::Item(item);
+                return Poll::Ready(Some(item));
             }
         }
         if self.futures.is_empty() {
-            PollNext::Done
+            Poll::Ready(None)
         } else {
-            PollNext::Pending
+            Poll::Pending
         }
     }
 
