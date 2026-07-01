@@ -400,11 +400,10 @@ deadlock in the wild.
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-### What other names should we consider for `poll_progress`?
-
-In my experience `poll_progress` is the most common name folks use to refer to
-this feature, but I've also seen `poll_proceed` and `poll_bg`. We'll probably
-want to bikeshed this a bit.
+- Why is this design the best in the space of possible designs?
+- What other designs have been considered and what is the rationale for not choosing them?
+- What is the impact of not doing this?
+- If this is a language proposal, could this be done in a library or macro instead? Does the proposed change make Rust code easier or harder to read, understand, and maintain?
 
 ## Prior art
 [prior-art]: #prior-art
@@ -448,6 +447,12 @@ This RFC is disruptive enough that I wanted to start with the minimal possible
 rendition of it, but if there does turn out to be consensus in favor of a
 `PollNext` enum over `Poll<Option<_>>`, it would make sense to make that change
 at the same time.
+
+### What other names should we consider for `poll_progress`?
+
+In my experience `poll_progress` is the most common name folks use to refer to
+this feature, but I've also seen `poll_proceed` and `poll_bg`. We'll probably
+want to bikeshed this a bit.
 
 ### Should we rename `AsyncIterator` to `Stream`?
 
