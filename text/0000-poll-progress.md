@@ -462,6 +462,31 @@ find/replace here.
 
 [substantial discussion]: https://github.com/rust-lang/rfcs/blob/master/text/2996-async-iterator.md#naming
 
+### Will anyone ever look at the `poll_progress` return value?
+
+`poll_progress` returns `Poll::Pending` if it's registered a wakeup, and
+`Poll::Ready(())` otherwise. We treat it as "fused" in the sense that calling
+it again is allowed and _kinda sorta_ guaranteed to return `Ready` again. (We
+don't document that guarantee, but if `poll_progress` spontaneously started
+returning `Pending` again, that would probably mean it failed to register a
+wakeup for itself earlier, and it only got polled again by chance. That's
+probably an implementation bug?)
+
+In theory we could make it a logic error to call `poll_progress` again after it
+returns `Ready` -- like it is to call `poll_next` again after it returns
+`Done`, or `Iterator::next` after it returns `None` -- but in practice it's
+hard to imagine an implementation that would benefit from that requirement,
+while it would be a bookkeeping burden on many callers. (`Iterator` combinators
+that would need extra fields to fuse themselves are also quite rare, but there
+are a couple standard ones, including `map_while` and `scan`.) It seems simpler
+overall to make `poll_progress` idempotent after it returns `Ready`.
+
+But that raises the question: If callers don't need to tracking the previous
+return value, then they probably aren't looking at it at all. It could save a
+couple lines in a lot of `poll_progress` implementations if it just returned
+nothing. Would any callers care? Does anyone really need to know whether
+`poll_progress` registered a wakeup?
+
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
