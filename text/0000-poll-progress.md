@@ -57,9 +57,8 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tokio_stream::StreamExt;
 
-// `foo` takes a private lock, sleeps briefly, and releases it.
-// It doesn't look like a deadlock could be possible here.
-async fn foo() {
+// `do_work` takes a private lock, sleeps briefly, and releases it. A deadlock here shouldn't be possible.
+async fn do_work() {
     static LOCK: Mutex<()> = Mutex::const_new(());
     let _guard = LOCK.lock().await;
     sleep(Duration::from_millis(10)).await;
@@ -67,9 +66,11 @@ async fn foo() {
 
 #[tokio::main]
 async fn main() {
-    let my_iter = once(foo()).merge(once(foo()));
+    // `my_iter` combines two child iterators, each of which wraps a `do_work` future.
+    let my_iter = once(do_work()).merge(once(do_work()));
     for await _ in my_iter {
-        foo().await; // Deadlock!
+        // This deadlocks! One of the `do_work` futures above is holding `LOCK`, but we've stopped polling it.
+        do_work().await;
     }
 }
 ```
@@ -77,13 +78,13 @@ async fn main() {
 [`Merge`] doesn't implement `AsyncIterator` today, so this example doesn't
 compile as written, but you can run it on stable by [replacing `for await` with
 `for_each`][for_each]. When control enters the loop body, the right side of the
-`Merge` still holds a `foo` future, which is suspended at the point where it's
+`Merge` still holds a `do_work` future, which is suspended at the point where it's
 tried to acquire `LOCK` and taken a spot in its waiters queue. The call to
-`foo` in the body tries to acquire `LOCK` again, but the waiter at the front of
+`do_work` in the body tries to acquire `LOCK` again, but the waiter at the front of
 the queue never again makes progress, so it's deadlocked.
 
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
-[for_each]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=de5cd32fc00a9e5357c40684e20c08fa
+[for_each]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aonce%28do_work%28%29%29%0A++++++++.merge%28stream%3A%3Aonce%28do_work%28%29%29%29%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
 Hangs and deadlocks like this are [more frequently discussed][barbara] in the
 context of "fancy" async iterators like [`FuturesUnordered`] or [`buffered`]
@@ -351,7 +352,7 @@ nice improvement when it works. Unfortunately, it doesn't always work. Here's
 an example of a `next` caller that can't easily switch to `for await`
 ([playground link][loop_select]):
 
-[loop_select]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%28rand%3A%3Arandom_range%280..5%29%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
+[loop_select]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++do_work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++do_work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
 ```rs
 let mut futures = FuturesUnordered::new();
