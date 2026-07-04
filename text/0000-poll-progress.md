@@ -44,18 +44,21 @@ for await item in my_iter {
 When control is at the top, the `for await` loop calls `my_iter.poll_next`
 until it either yields an item with `Ready(Some(_))` or indicates that it's
 done with `Ready(None)`. Once control moves into `do_work`, the loop stops
-driving `my_iter` entirely. That applies necessary "backpressure" to the
-iterator, and it's mostly by design. But it can be a problem if `my_iter` wraps
-multiple concurrent futures or other iterators internally, because suspending
-some of those at arbitrary `.await` points isn't generally correct. Here's an
-example where this causes a deadlock that looks like it should be impossible in
-a straight-line reading of the code:
+driving `my_iter` entirely. That applies necessary "backpressure" to async
+iterators, and it's mostly by design. But it can be a problem if `my_iter`
+wraps multiple concurrent futures or other iterators internally, because
+suspending some of those at arbitrary `.await` points isn't generally correct.
+Here's an example where this causes a deadlock that looks like it should be
+impossible in a straight-line reading of the code:
 
 ```rs
-use futures::stream::FuturesUnordered;
+use futures::stream::once;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
+use tokio_stream::StreamExt;
 
+// `foo` takes a private lock, sleeps briefly, and releases it.
+// It doesn't look like a deadlock could be possible here.
 async fn foo() {
     static LOCK: Mutex<()> = Mutex::const_new(());
     let _guard = LOCK.lock().await;
@@ -64,38 +67,41 @@ async fn foo() {
 
 #[tokio::main]
 async fn main() {
-    let futures = FuturesUnordered::new();
-    futures.push(foo());
-    futures.push(foo());
-    for await _ in futures {
+    let my_iter = once(foo()).merge(once(foo()));
+    for await _ in my_iter {
         foo().await; // Deadlock!
     }
 }
 ```
 
-[`FuturesUnordered`] doesn't implement `AsyncIterator` today, so this example
-doesn't compile as written, but you can run it on stable by [replacing `for
-await` with `for_each`][for_each]. When control enters the loop body, one of
-the `foo` futures remains in the `FuturesUnordered` buffer, suspended at the
-point where it's tried to acquire `LOCK` and taken a spot in its waiters queue.
-The call to `foo` in the body tries to acquire `LOCK` again, but the waiter at
-the front of the queue never again makes progress, so it's deadlocked.
+[`Merge`] doesn't implement `AsyncIterator` today, so this example doesn't
+compile as written, but you can run it on stable by [replacing `for await` with
+`for_each`][for_each]. When control enters the loop body, the right side of the
+`Merge` still holds a `foo` future, which is suspended at the point where it's
+tried to acquire `LOCK` and taken a spot in its waiters queue. The call to
+`foo` in the body tries to acquire `LOCK` again, but the waiter at the front of
+the queue never again makes progress, so it's deadlocked.
 
-[`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
-[for_each]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=ceccac95773cbba8aeddf162b5793a3f
+[`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
+[for_each]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=de5cd32fc00a9e5357c40684e20c08fa
+
+Hangs and deadlocks like this are [more frequently discussed][barbara] in the
+context of "fancy" async iterators like [`FuturesUnordered`] or [`buffered`]
+streams, but this example uses `merge` to emphasize that "fundamental"
+combinators have the same problem.
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
-latencies, concurrent async iterators like `FuturesUnordered` need to
-continuously drive the futures they contain. That means that `for await` and
-other combinators need a way to let an iterator make progress, even when
-they're not ready to accept another item.
+latencies, concurrent async iterators like these need to continuously drive the
+futures they contain. That means that `for await` and other combinators need a
+way to let an iterator make progress, even when they're not ready to accept
+another item.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
 ### How `FuturesUnordered` might document its behavior
 
-`FuturesUnordered` is an async iterator over the results of the futures it
+[`FuturesUnordered`] is an async iterator over the results of the futures it
 contains. Looping over it gives you each of the results as they arrive, and
 pending futures keep making progress concurrently with the loop body. For
 example:
@@ -391,9 +397,8 @@ internal concurrency, but here we have an iterator being driven concurrently
 with something else, and if either side stops making progress we get all the
 same problems. We can deadlock this with a `Mutex` that's touched by both the
 loop and the work it's driving ([playground link][loop_select_deadlock]).
-["Futurelock"](https://rfd.shared.oxide.computer/rfd/0609) is a good case study
-in how mind-numbingly hard these `select!` loops are to debug when they
-deadlock in the wild.
+["Futurelock"][futurelock] is a good case study in how mind-numbingly hard
+these `select!` loops are to debug when they deadlock in the wild.
 
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++foo%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++foo%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
@@ -411,10 +416,10 @@ deadlock in the wild.
 Various approaches to this feature, and the hangs and deadlocks that motivate
 it, have been discussed for many years. Some points of reference:
 
-- ["Barbara battles buffered streams"](https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html)
+- ["Barbara battles buffered streams"][barbara]
 - ["`for await` and the battle of buffered streams"](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
 - https://without.boats/blog/poll-progress
-- ["Futurelock"](https://rfd.shared.oxide.computer/rfd/0609)
+- ["Futurelock"][futurelock]
 - ["Never snooze a future"](https://jacko.io/snooze.html)
 
 ## Unresolved questions
@@ -507,3 +512,8 @@ Note that having something written down in the future-possibilities section
 is not a reason to accept the current or a future RFC; such notes should be
 in the section on motivation or rationale in this or subsequent RFCs.
 The section merely provides additional information.
+
+[barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
+[futurelock]: https://rfd.shared.oxide.computer/rfd/0609
+[`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
+[`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
