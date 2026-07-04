@@ -406,10 +406,42 @@ these `select!` loops are to debug when they deadlock in the wild.
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-- Why is this design the best in the space of possible designs?
-- What other designs have been considered and what is the rationale for not choosing them?
-- What is the impact of not doing this?
-- If this is a language proposal, could this be done in a library or macro instead? Does the proposed change make Rust code easier or harder to read, understand, and maintain?
+### Is pausing futures at `.await` points so terrible? Could we instead agree to allow it?
+
+The fundamental assumption of this RFC is that we need to guarantee continuous
+control flow through async code. Async control flow can include cancellation
+via `Drop`, but indefinite pauses shouldn't be possible.
+
+Is that a good assumption? Do we have consensus on that? What are the other
+options?
+
+I think the clearest argument for this assumption is an analogy to
+multithreading. "Everybody knows" that we can't pause or cancel running
+threads. If a paused or cancelled thread happens to be holding any locks, we'll
+probably deadlock ourselves. In the dark corners of systems programming where
+we do pause threads, like Unix signal handlers, we have to take extraordinary
+care not to touch any locks in that critical section, which means e.g. no
+allocating memory and no printing.
+
+Async Rust can handle cancellation better than threads do, because `Drop`
+cleans up our lock guards. But _pausing_ a Rust future isn't much different
+from pausing a thread. It can only happen at an `.await` point, so at least we
+don't have to worry about the `malloc` lock, but for any exclusive resource
+that might be held across an `.await`, the story is the same. In
+["Futurelock"][futurelock] for example, it was a sempahore buried inside
+Tokio's channel implementation. If async Rust code has to tolerate indefinite
+pauses, then we need to be defensive about futurelocks everywhere, and writing
+async applications starts to feel like writing Unix signal handlers.
+
+Could there be a third way? Maybe there could be some sort of `Drop`-like hook
+that tells futures and async iterators when they're about to be paused or
+resumed? I haven't explored this in any detail, but my first question would be:
+"If I'm holding a lock, what am I supposed to do in that hook? Release the
+lock?" The point of locking is that it lets us group operations together
+atomically. If a lock can be _stolen_ from us in the middle of our critical
+section, then it isn't really a lock at all. Realistically, this third way
+would have to look more like lock-free programming. Lock-free code is great,
+but it's not the _only_ sort of code that async Rust aims to support.
 
 ## Prior art
 [prior-art]: #prior-art
@@ -433,13 +465,13 @@ RFC keeps that unchanged. That return type captures the three possible return
 states (item, pending, and done), but it doesn't represent anything about the
 `poll_next`/`poll_progress` contract. Compare that to the `Future::poll`
 method. Rust could've defined `poll` to return `Option<Output>`, but the
-`Future` contract is important/subtle enough that it's worth adding a separate
-type to represent it.
+`Future` contract is important and subtle enough that it was worth adding a
+separate type to represent it.
 
 The same could be said of `poll_next`. The "yielded an item" state comes with
 both _permission_ to call `poll_progress` and a _requirement_ to call either
-`poll_next` or `poll_progress`. This is important/subtle enough that I do think
-we should change `poll_next` to return a new enum:
+`poll_next` or `poll_progress` again. This is important and subtle enough that
+I do think we should change `poll_next` to return a new enum:
 
 ```rs
 enum PollNext<Item> {
@@ -475,20 +507,20 @@ find/replace here.
 it again is allowed and _kinda sorta_ guaranteed to return `Ready` again. (We
 don't document that guarantee, but if `poll_progress` spontaneously started
 returning `Pending` again, that would probably mean it failed to register a
-wakeup for itself earlier, and it only got polled again by chance. That's
-probably an implementation bug?)
+wakeup for itself earlier, and it only got polled again by chance. That's an
+implementation bug?)
 
 In theory we could make it a logic error to call `poll_progress` again after it
-returns `Ready` -- like it is to call `poll_next` again after it returns
-`Done`, or `Iterator::next` after it returns `None` -- but in practice it's
+returns `Ready` -- like it is to call `Future::poll` again after it returns
+`Ready`, or `Iterator::next` after it returns `None` -- but in practice it's
 hard to imagine an implementation that would benefit from that requirement,
 while it would be a bookkeeping burden on many callers. (`Iterator` combinators
-that would need extra fields to fuse themselves are also quite rare, but there
+that would need extra state to fuse themselves are also quite rare, but there
 are a couple standard ones, including `map_while` and `scan`.) It seems simpler
 overall to make `poll_progress` idempotent after it returns `Ready`.
 
-But that raises the question: If callers don't need to tracking the previous
-return value, then they probably aren't looking at it at all. It could save a
+But that raises the question: If callers don't need to track the previous
+return value, then they probably won't look at it at all. It could save a
 couple lines in a lot of `poll_progress` implementations if it just returned
 nothing. Would any callers care? Does anyone really need to know whether
 `poll_progress` registered a wakeup?
