@@ -83,7 +83,6 @@ tried to acquire `LOCK` and taken a spot in its waiters queue. The call to
 `do_work` in the body tries to acquire `LOCK` again, but the waiter at the front of
 the queue never again makes progress, so it's deadlocked.
 
-[`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [for_each]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aonce%28do_work%28%29%29%0A++++++++.merge%28stream%3A%3Aonce%28do_work%28%29%29%29%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
 Hangs and deadlocks like this are [more frequently discussed][barbara] in the
@@ -95,7 +94,7 @@ To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
 futures they contain. That means that `for await` and other combinators need a
 way to let an iterator make progress, even when they're not ready to accept
-another item.
+another item. `poll_progress` is how they will do this.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -382,7 +381,6 @@ body. [`join_me_maybe`] has [experimental support for this][experiment] today,
 but I'm not aware of anything like it in common use.
 
 [`moro`]: https://github.com/nikomatsakis/moro
-[`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [`join_me_maybe`]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
 [experiment]: https://docs.rs/join_me_maybe/latest/join_me_maybe/#mutable-access-to-futures-and-streams
 
@@ -416,12 +414,12 @@ Is that a good assumption? Do we have consensus on that? What are the other
 options?
 
 I think the clearest argument for this assumption is an analogy to
-multithreading. "Everybody knows" that we can't pause or cancel running
-threads. If a paused or cancelled thread happens to be holding any locks, we'll
-probably deadlock ourselves. In the dark corners of systems programming where
-we do pause threads, like Unix signal handlers, we have to take extraordinary
-care not to touch any locks in that critical section, which means e.g. no
-allocating memory and no printing.
+multithreading. ["Everybody knows"](https://jacko.io/snooze.html#threads) that
+we can't pause or cancel running threads. If a paused or cancelled thread
+happens to be holding any locks, we'll probably deadlock ourselves. In the dark
+corners of systems programming where we do pause threads, like Unix signal
+handlers, we have to take extraordinary care not to touch any locks in that
+critical section, which means e.g. no allocating memory and no printing.
 
 Async Rust can handle cancellation better than threads do, because `Drop`
 cleans up our lock guards. But _pausing_ a Rust future isn't much different
@@ -435,13 +433,78 @@ async applications starts to feel like writing Unix signal handlers.
 
 Could there be a third way? Maybe there could be some sort of `Drop`-like hook
 that tells futures and async iterators when they're about to be paused or
-resumed? I haven't explored this in any detail, but my first question would be:
+resumed. I haven't explored this in any detail, but my first question would be:
 "If I'm holding a lock, what am I supposed to do in that hook? Release the
 lock?" The point of locking is that it lets us group operations together
 atomically. If a lock can be _stolen_ from us in the middle of our critical
 section, then it isn't really a lock at all. Realistically, this third way
 would have to look more like lock-free programming. Lock-free code is great,
 but it's not the _only_ sort of code that async Rust aims to support.
+
+### Why not allow `poll_progress` at any time?
+
+The third part of the three-part `AsyncIterator` contract this RFC is proposing
+is that `poll_progress` shouldn't be called when `poll_next` is pending. That
+seems kind of arbitrary. What's the point of that rule?
+
+Consider the `poll_progress` implementation of a combinator like [`Merge`].
+_Without_ the third rule, it could be as short as this:
+
+```rs
+fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+    let this = self.project();
+    // XXX: This version doesn't keep track of whether `poll_next` is pending.
+    let poll1 = this.left.poll_progress(cx);
+    let poll2 = this.right.poll_progress(cx);
+    any_pending([poll1, poll2])
+}
+```
+
+That would be nice and simple, but the downside is that _every other_ async
+iterator would need to handle the case where their caller abruptly switches
+from `poll_next` to `poll_progress` before they yield an item. For example,
+think about this hypothetical `async gen` function:
+
+```rs
+async gen fn foo() {
+    do_work().await;
+    yield;
+}
+```
+
+If control is in the middle of `do_work`, `foo` can't just leave it stuck
+there, or else we'll have the same deadlocks we saw at the top. If `foo` had to
+tolerate a switch from `poll_next` to `poll_progress` at any time, then
+`poll_progress` would need to keep driving control through the body up to the
+next `yield`. However, `poll_progress` should't _always_ drive control to the
+next `yield`. If it did, then `for await` loops would always drive their
+iterators concurrently with their loop bodies, which isn't how they're supposed
+to work. Instead, `foo` would need to track whether `poll_next` has been called
+_at least once_ before allowing control to enter the body, and before allowing
+control to proceed after a `yield`. That's certainly doable, but consider
+applying the same logic to existing combinators like [`Map`] and [`Then`].
+Those would need to add a state flag that they don't have today (say
+`next_item_wanted`), and they'd also need a rarely-used buffer slot for an
+item.
+
+[`Map`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.map
+[`Then`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.then
+
+In practice, the bookkeeping for "if `poll_next` has been called at least once,
+`poll_progress` advances control to the next yield and buffers an item" would
+look awfully similar to the bookkeeping for "don't call `poll_progress` when
+`poll_next` is pending", except moved down a level from the caller to the
+callee. Rather than adding complexity and buffer slots only to concurrent async
+iterators like `Merge` and [`StreamMap`], we'd add complexity and buffer slots
+to _every_ async iterator. Not a good trade.
+
+Also, if the `AsyncIterator` contract is going to be somewhat subtle and
+error-prone either way, a major upside of the rule as proposed is that it's
+clear when it's been violated, and we can enforce it with `debug_assert!`s.
+(`async gen fn` should handle violations by panicking, just like `async fn`
+futures panic today if you poll them again after they've returned.) If any
+interleaving of `poll_next` and `poll_progress` was valid, it would be a lot
+harder to detect `AsyncIterator` contract violations programmatically.
 
 ## Prior art
 [prior-art]: #prior-art
@@ -550,3 +613,5 @@ The section merely provides additional information.
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
+[`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
+[`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
