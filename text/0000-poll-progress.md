@@ -351,7 +351,7 @@ nice improvement when it works. Unfortunately, it doesn't always work. Here's
 an example of a `next` caller that can't easily switch to `for await`
 ([playground link][loop_select]):
 
-[loop_select]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++do_work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++do_work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
+[loop_select]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%28rand%3A%3Arandom_range%280..5%29%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
 ```rs
 let mut futures = FuturesUnordered::new();
@@ -369,37 +369,21 @@ loop {
 ```
 
 In this example, the caller is iterating over a `FuturesUnordered` and also
-adding more work to it in the loop body. There are several problems with
-switching to `for await _ in futures` here, but the biggest one is that it
-would take ownership of `futures`, and `futures.push(job)` wouldn't compile
-after that. Some callers might opt to replace this whole exercise with channels
-and task spawning, or with the [`moro`] crate, which allows for local
-borrowing. Alternatively, callers who'd rather keep `FuturesUnordered` (or
-[`StreamMap`], or some embedded/`no_std` cousin of those) could consider a loop
-macro that provides temporary mutable access to the iterator within the loop
-body. [`join_me_maybe`] has [experimental support for this][experiment] today,
-but I'm not aware of anything like it in common use.
+adding more work to it in the loop body. We can't reorganize this around a `for
+await`, because that would take ownership of `futures`, and `futures.push(job)`
+wouldn't compile. Patterns like this aren't the most common, but sometimes they
+sit at the core of larger application loops, and migrating away from them can
+be impractical.
 
-[`moro`]: https://github.com/nikomatsakis/moro
-[`join_me_maybe`]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
-[experiment]: https://docs.rs/join_me_maybe/latest/join_me_maybe/#mutable-access-to-futures-and-streams
+In these difficult cases, it's possible to recreate the `next` method in a
+`poll_progress`-compatible way using a macro. Here is a [working
+proof-of-concept](https://github.com/oconnor663/drive_async_iterator). The key
+is that the macro takes ownership of the async iterator and provides a handle
+with a `next` method on it, which lets the macro call `poll_progress`
+concurrently with its body as needed. Apart from easing migration, a macro like
+this also fixes [potential deadlocks in the loop above][loop_select_deadlock].
 
-There's a lot of code in the wild that looks like this example, and changing or
-replacing these patterns will be difficult. On the other hand, these examples
-are often subtly broken today, not only because rapid-fire cancellation is
-tricky, but also more importantly because `select!`-`.next()`-in-a-loop stops
-driving its iterator inside the `select!` bodies. (The borrow checker can see
-that it stops; that's why we're allowed to re-borrow `futures` in the loop
-above.) That's exactly the sort of deadlock-prone behavior this RFC is trying
-to fix! The motivating examples in the first sections are about iterators with
-internal concurrency, but here we have an iterator being driven concurrently
-with something else, and if either side stops making progress we get all the
-same problems. We can deadlock this with a `Mutex` that's touched by both the
-loop and the work it's driving ([playground link][loop_select_deadlock]).
-["Futurelock"][futurelock] is a good case study in how mind-numbingly hard
-these `select!` loops are to debug when they deadlock in the wild.
-
-[loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++foo%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++foo%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
+[loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
