@@ -575,6 +575,96 @@ nothing. Would any callers care? Does anyone really need to know whether
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
+### Concurrency syntax for the body of an `async gen fn`
+
+Today we can only introduce concurrency into async iteration by using
+combinators like `Merge`, which are written "by hand" using the `AsyncIterator`
+API. We can't write a concurrent program using `for await` and `async gen fn`
+by themselves. But it's interesting to consider how that could change.
+
+An `async fn` (not a generator) can get concurrency in its body using a `join!`
+macro, which is "almost like syntax". For example:
+
+```rs
+async fn foo() {
+    join!(
+        async {
+            do_stuff().await;
+        },
+        async {
+            do_other_stuff().await;
+        },
+    );
+}
+```
+
+This works today, though you'll notice some rough edges if you try to `return`
+or `?` in either of those blocks. But the `async gen fn` equivalent doesn't
+work at all:
+
+```rs
+async gen fn foo() {
+    join!(
+        async {
+            yield; // error
+        },
+        ...
+    );
+}
+```
+
+What it there was some hypothetical built-in syntax for writing the `async fn`
+above? Maybe it could support error handling and other short-circuiting
+operations (`break`, `continue`) more gracefully:
+
+```rs
+async fn bar() -> anyhow::Result<()> {
+    await all {
+        do_stuff().await?;
+    } and {
+        do_other_stuff().await?;
+    }
+    Ok(())
+}
+```
+
+What if that hypothetical syntax supported _yielding_? What might _this_ do?
+
+```rs
+async gen fn bar() -> u32 {
+    await all {
+        yield do_stuff().await;
+    } and {
+        yield do_other_stuff().await;
+    }
+}
+```
+
+Could you implement `merge` like _this_?
+
+```rs
+impl AsyncIteratorExt {
+    async gen fn merge<Other>(self, other: Other) -> Self::Item
+    where
+        Other: IntoAsyncIterator<Item = Self::Item>,
+    {
+        await all {
+            for await item in self {
+                yield item;
+            }
+        } and {
+            for await item in other {
+                yield item;
+            }
+        }
+    }
+}
+```
+
+### Generalized coroutines
+
+...
+
 Think about what the natural extension and evolution of your proposal would
 be and how it would affect the language and project as a whole in a holistic
 way. Try to use this section as a tool to more fully consider all possible
