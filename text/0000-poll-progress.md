@@ -9,7 +9,9 @@
 Add a required `poll_progress` method to the [`AsyncIterator`] trait, and make
 `for await` loops call this method whenever an `.await` in their loop body is
 `Pending`. Expand the documented `AsyncIterator` contract to require
-combinators and consumers to do the same.
+combinators and consumers to do the same. To emphasize the contract
+requirements of `poll_next`, define a new `PollNext` enum for it to return,
+replacing `Poll<Option<_>>`.
 
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
 
@@ -94,7 +96,9 @@ To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
 futures they contain. That means that `for await` and other combinators need a
 way to let an iterator make progress, even when they're not ready to accept
-another item. `poll_progress` is how they will do this.
+another item. `poll_progress` is how they will do this. It will come with new
+contract requirements, and to emphasize those we'll change the return type of
+`poll_next` from `Poll<Option<_>>` to a dedicated `PollNext` enum.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -171,15 +175,15 @@ finished, we loop around and print `got B` immediately.
 
 #### `poll_next`
 
-- `Poll::Pending` means... \[no change\]
-
-- `Poll::Ready(Some(val))` means that the async iterator has successfully
-  produced a value, `val`, and may produce further values on subsequent
+- `PollNext::Item(item)` means that the async iterator has successfully
+  produced an item, `item`, and may produce further items on subsequent
   `poll_next` calls. In this case **the caller must arrange to call either
   `poll_next` or `poll_progress` again promptly.** If the caller is another
   `poll_next` method, it can trust its own caller to arrange this.
 
-- `Poll::Ready(None)` means that the async iterator has terminated, and neither
+- `PollNext::Pending` means...
+
+- `PollNext::Done` means that the async iterator has terminated, and neither
   `poll_next` nor `poll_progress` should be invoked again.
 
 #### `poll_progress`
@@ -202,7 +206,7 @@ value is not yet needed.
 
 `poll_progress` **must not be called** after the most recent call to
 `poll_next` has returned `Pending` or after any call to `poll_next` has
-returned `Ready(None)`. Calling `poll_progress` in either of those cases may
+returned `Done`. Calling `poll_progress` in either of those cases may
 panic, block forever, or cause other kinds of problems; the `AsyncIterator`
 trait places no requirements on the effects of such a call. However, as the
 `poll_progress` method is not marked `unsafe`, Rust's usual rules apply: calls
@@ -222,16 +226,16 @@ pub struct Once<Fut> {
 impl<Fut: Future> AsyncIterator for Once<Fut> {
     type Item = Fut::Output;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item> {
         if let Some(fut) = &mut self.future {
             if let Poll::Ready(item) = fut.as_mut().poll(cx) {
                 self.future = None;
-                Poll::Ready(Some(item))
+                PollNext::Item(item)
             } else {
-                Poll::Pending
+                PollNext::Pending
             }
         } else {
-            Poll::Ready(None)
+            PollNext::Done
         }
     }
 
@@ -263,7 +267,7 @@ pub struct MergeAll<Fut: Future> {
 impl<Fut: Future> AsyncIterator for MergeAll<Fut> {
     type Item = Fut::Output;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item> {
         // If we've buffered any items, yield one of those.
         if let Some(item) = self.items.pop_front() {
             return PollNext::Item(item);
@@ -272,13 +276,13 @@ impl<Fut: Future> AsyncIterator for MergeAll<Fut> {
         for i in 0..self.futures.len() {
             if let Poll::Ready(item) = self.futures[i].as_mut().poll(cx) {
                 self.futures.swap_remove(i);
-                return Poll::Ready(Some(item));
+                return PollNext::Item(item);
             }
         }
         if self.futures.is_empty() {
-            Poll::Ready(None)
+            PollNext::Done
         } else {
-            Poll::Pending
+            PollNext::Pending
         }
     }
 
@@ -490,6 +494,20 @@ futures panic today if you poll them again after they've returned.) If any
 interleaving of `poll_next` and `poll_progress` was valid, it would be a lot
 harder to detect `AsyncIterator` contract violations programmatically.
 
+### Does `poll_next` need a new return type enum?
+
+Today's `Poll<Option<_>>` return type captures the three possible return states
+(item, pending, and done), but it doesn't represent anything about the
+`poll_next`/`poll_progress` contract. Compare that to the `Future::poll`
+method. Rust could've defined `poll` to return `Option<Output>`, but the
+`Future` contract is important and subtle enough that it was worth adding a
+separate type to represent it.
+
+I think the same is true of `poll_next` in the new contract. The "yielded an
+item" state comes with both _permission_ to call `poll_progress` and a
+_requirement_ to call either `poll_next` or `poll_progress` again. This is
+important and subtle enough it's worth a dedicated return type.
+
 ## Prior art
 [prior-art]: #prior-art
 
@@ -504,34 +522,6 @@ it, have been discussed for many years. Some points of reference:
 
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
-
-### Should `poll_next` get its own return type enum?
-
-The `poll_next` method currently returns `Poll<Option<Item>>`, and most of this
-RFC keeps that unchanged. That return type captures the three possible return
-states (item, pending, and done), but it doesn't represent anything about the
-`poll_next`/`poll_progress` contract. Compare that to the `Future::poll`
-method. Rust could've defined `poll` to return `Option<Output>`, but the
-`Future` contract is important and subtle enough that it was worth adding a
-separate type to represent it.
-
-The same could be said of `poll_next`. The "yielded an item" state comes with
-both _permission_ to call `poll_progress` and a _requirement_ to call either
-`poll_next` or `poll_progress` again. This is important and subtle enough that
-I do think we should change `poll_next` to return a new enum:
-
-```rs
-enum PollNext<Item> {
-    Item(Item),
-    Pending,
-    Done,
-}
-```
-
-This RFC is disruptive enough that I wanted to start with the minimal possible
-rendition of it, but if there does turn out to be consensus in favor of a
-`PollNext` enum over `Poll<Option<_>>`, it would make sense to make that change
-at the same time.
 
 ### What other names should we consider for `poll_progress`?
 
