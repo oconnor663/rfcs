@@ -103,6 +103,44 @@ contract requirements, and to emphasize those we'll change the return type of
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
+### `AsyncIterator`
+
+As its name suggests, `AsyncIterator` is the async version of [`Iterator`]. The
+same way `Iterator` is the trait at the heart of `for` loops and many other
+kinds of iteration, `AsyncIterator` is the trait at the heart of `for await`
+loops and many other kinds of asynchronous iteration.
+
+[`Iterator`]: https://doc.rust-lang.org/std/iter/trait.Iterator.html
+
+Async code can and often does use regular iterators and `for` loops, as long as
+producing their next item never blocks, for example loops over a range or a
+collection. But async functions aren't allowed to do blocking IO, so they can't
+use regular iterators like [`std::io::Lines`] or [`std::fs::ReadDir`] that
+sometimes block. The main purpose of `AsyncIterator` is to support iterators
+that need to do IO, in a way that's compatible with async code.
+
+[`std::io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
+[`std::fs::ReadDir`]: https://doc.rust-lang.org/std/fs/struct.ReadDir.html
+
+At the same time, async iterators have a special ability that regular iterators
+generally do not. They can keep doing work "in the backgroud" while the caller
+is processing an item. For example:
+
+```rs
+for await jpeg in fetch_images() {
+    save_image(jpeg)?.await;
+}
+```
+
+Depending on how it's implemented, the async iterator returned by
+`fetch_images` could start downloading the next `jpeg` even while control is
+inside `save_image`. Regular iterators that want to do background work like
+this have to use threads somehow, which complicates borrowing and cancellation
+and usually requires heap allocation. But async iterators can do concurrent
+background work without threads or allocations, with full support for local
+borrowing, and with intuitive behavior for `break` and `return` (cancelling the
+background work).
+
 ### How `FuturesUnordered` might document its behavior
 
 [`FuturesUnordered`] is an async iterator over the results of the futures it
