@@ -34,8 +34,8 @@ pub trait AsyncIterator { // or `pub trait Stream`
 }
 ```
 
-In this interface, all the work an iterator does is driven through `poll_next`.
-Consider how that works in the context of a `for await` loop:
+In this interface, everything an iterator does happens in `poll_next`. Consider
+how that works in the context of a `for await` loop:
 
 ```rs
 for await item in my_iter {
@@ -80,49 +80,50 @@ async fn main() {
 [`Merge`] doesn't implement `AsyncIterator` today, so this example doesn't
 compile as written, but you can run it on stable by [replacing `for await` with
 `for_each`][for_each]. When control enters the loop body, the right side of the
-`Merge` still holds a `do_work` future, which is suspended at the point where it's
-tried to acquire `LOCK` and taken a spot in its waiters queue. The call to
-`do_work` in the body tries to acquire `LOCK` again, but the waiter at the front of
-the queue never again makes progress, so it's deadlocked.
+`Merge` still holds a `do_work` future, which is suspended at the point where
+it has tried to acquire `LOCK` and taken a spot in its waiters queue. The call
+to `do_work` in the body tries to acquire `LOCK` again, but the waiter at the
+front of the queue never again makes progress, so it's deadlocked.
 
 [for_each]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aonce%28do_work%28%29%29%0A++++++++.merge%28stream%3A%3Aonce%28do_work%28%29%29%29%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
-Hangs and deadlocks like this are [more frequently discussed][barbara] in the
-context of "fancy" async iterators like [`FuturesUnordered`] or [`buffered`]
-streams, but this example uses `merge` to emphasize that "fundamental"
-combinators have the same problem.
+We usually talk about hangs and deadlocks like these [in the context of "fancy"
+async iterators like `FuturesUnordered` or `buffered` streams][barbara], but
+the example above uses `merge` to emphasize that simpler combinators have the
+same problem.
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
 futures they contain. That means that `for await` and other combinators need a
 way to let an iterator make progress, even when they're not ready to accept
-another item. `poll_progress` is how they will do this. It will come with new
-contract requirements, and to emphasize those we'll change the return type of
-`poll_next` from `Poll<Option<_>>` to a dedicated `PollNext` enum.
+another item. The new `poll_progress` method is how they can do this. It comes
+with new contract requirements, and to emphasize those we'll change the return
+type of `poll_next` from `Poll<Option<_>>` to a dedicated `PollNext` enum.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-### `AsyncIterator`
+### `AsyncIterator` intro
 
-As its name suggests, `AsyncIterator` is the async version of [`Iterator`]. The
-same way `Iterator` is the trait at the heart of `for` loops and many other
+As its name suggests, `AsyncIterator` is the async version of [`Iterator`].
+Just like `Iterator` is the trait at the heart of `for` loops and many other
 kinds of iteration, `AsyncIterator` is the trait at the heart of `for await`
 loops and many other kinds of asynchronous iteration.
 
 [`Iterator`]: https://doc.rust-lang.org/std/iter/trait.Iterator.html
 
-Async code can and often does use regular iterators and `for` loops, as long as
-producing their next item never blocks, for example loops over a range or a
-collection. But async functions aren't allowed to do blocking IO, so they can't
-use regular iterators like [`std::io::Lines`] or [`std::fs::ReadDir`] that
-sometimes block. The main purpose of `AsyncIterator` is to support iterators
-that need to do IO, in a way that's compatible with async code.
+Async code can and often does use regular iterators and `for` loops too, as
+long as producing their next item never blocks, like loops over a range or a
+collection. But async functions aren't allowed to do blocking IO, and they
+can't use regular iterators that sometimes block, for example
+[`std::io::Lines`] or [`std::sync::mpsc::Iter`]. The main purpose of
+`AsyncIterator` is to support iterators like these that sometimes need to wait
+on input, in a way that's compatible with async code.
 
 [`std::io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
-[`std::fs::ReadDir`]: https://doc.rust-lang.org/std/fs/struct.ReadDir.html
+[`std::sync::mpsc::Iter`]: https://doc.rust-lang.org/std/sync/mpsc/struct.Iter.html
 
-At the same time, async iterators have a special ability that regular iterators
+In addition, async iterators have a special ability that regular iterators
 generally do not. They can keep doing work "in the backgroud" while the caller
 is processing an item. For example:
 
@@ -133,17 +134,162 @@ for await jpeg in fetch_images() {
 ```
 
 Depending on how it's implemented, the async iterator returned by
-`fetch_images` could start downloading the next `jpeg` even while control is
-inside `save_image`. Regular iterators that want to do background work like
-this have to use threads somehow, which complicates borrowing and cancellation
-and usually requires heap allocation. But async iterators can do concurrent
-background work without threads or allocations, with full support for local
-borrowing, and with intuitive behavior for `break` and `return` (cancelling the
-background work).
+`fetch_images` could start downloading the next `jpeg` concurrently while
+control is inside `save_image`. A regular iterator would need to use threads to
+do that, which complicates borrowing and short-circuiting and usually requires
+heap allocation. But async iterators can do concurrent background work without
+threads or allocations, and with full support for local borrowing and intuitive
+behavior for `break` and `return` (cancelling the background work).
 
-### How `FuturesUnordered` might document its behavior
+### Implementing `AsyncIterator`
 
-[`FuturesUnordered`] is an async iterator over the results of the futures it
+The core of the `AsyncIterator` trait is the `poll_next` and `poll_progress`
+methods, which look like this:
+
+```rs
+trait AsyncIterator {
+    type Item;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Item>;
+    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()>;
+}
+
+enum PollNext<Item> {
+    Item(Item),
+    Pending,
+    Done,
+}
+```
+
+`poll_next` is a cross between `Iterator::next` and `Future::poll`. Like
+`Iterator::next`, it can return an item or indicate that the iterator is done.
+And like `Future::poll`, it can also return `Pending`, meaning that no item is
+currently ready, and a wakeup has been registered. When a `for await` loop
+wants to get the next item from an async iterator, it calls `poll_next`.
+
+`poll_progress` is unique to `AsyncIterator`, and it's what allows the iterator
+to do background work when the caller isn't ready for another item. It returns
+`Poll::Pending` (not `PollNext::Pending`) when more progress might be possible
+in the future, and it also registers a wakeup in that case. When no more
+internal progress is possible without calling `poll_next` again,
+`poll_progress` returns `Ready`. When an `.await` in the body of a `for await`
+loop is pending, the loop calls `poll_progress` on its iterator before
+reporting pending itself.
+
+[`Poll::Pending`]: https://doc.rust-lang.org/std/task/enum.Poll.html
+
+Like `Future::poll`, the return values of these methods impose certain
+requirements on their callers. But while `Future` only has two possible returns
+to contend with, `AsyncIterator` has _five_:
+
+| Previous return | You are required to... |
+| --- | --- |
+| `poll_next` returned `PollNext::Item` | Poll again **promptly**, either `poll_next` if you want another item or `poll_progress` if not. |
+| `poll_next` returned `PollNext::Pending` | `poll_next` again after wakeup. `poll_progress` is **not allowed**. |
+| `poll_next` returned `PollNext::Done` | Never poll again. Drop promptly. |
+| `poll_progress` returned `Poll::Pending` | `poll_next` whenever you want another item, otherwise `poll_progress` again after wakeup. |
+| `poll_progress` returned `Poll::Ready` | `poll_next` whenever you want another item, otherwise stop polling. `poll_progress` is allowed but has no further effect. |
+
+An `AsyncIterator` begins life in the first state above, as though `poll_next`
+had previously returned an item. Although a `for await` loop will always start
+by calling `poll_next`, other consumers may start with `poll_progress`. Also,
+cancelling an async iterator by dropping it is allowed at any time.
+
+The first two requirements in the table above bolded, because they're the most
+surprising. Expanding on those:
+
+- **The `PollNext::Item` rule:** When `poll_next` returns an item, we don't
+  expect it to register any wakeups. That's important for performance, because
+  there might be many items ready to return, and we don't want to trigger
+  redundant wakeups for each of them or cause an extra round trip through the
+  executor. On the flip side, once we don't want to call `poll_next` any more,
+  we need to call `poll_progress` once to cue the iterator to finish its own
+  polling responsibilities and register wakeups.
+- **The `PollNext::Pending` rule:** When `poll_next` is pending, we have to
+  `poll_next` again at the next wakeup; we can't "change our minds" about
+  wanting an item and switch to `poll_progress`. (The only valid way to change
+  our minds is to cancel the whole iterator by dropping it.) This mainly
+  affects concurrent combinators that "merge" multiple async iterators
+  together. After a child iterator yields an item, such a combinator should
+  keep driving its others children with `poll_next` internally until each of
+  them has yielded an item. This ensures the smooth flow of control through
+  chains of combinators, and it means that non-concurrent combinators don't
+  need to allocate buffer space for an item.
+
+Let's look at the implementation of an async iterator combinator, `Buffer1`,
+which wraps another `AsyncIterator` and pre-fetches the next item in
+`poll_progress`. This surprisingly powerful combinator turns _any_
+`AsyncIterator` into a concurrent iterator that does work in the background:
+
+```rs
+struct Buffer1<Iter: AsyncIterator> {
+    #[pin]  // TODO: a standard way to do structural pinning in examples?
+    inner: Option<Iter>,
+    item: Option<Iter::Item>,
+}
+
+impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
+    type Item = Iter::Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Iter::Item> {
+        let mut this = self.project();
+        if let Some(item) = this.item.take() {
+            // If we have a buffered `item`, return it.
+            PollNext::Item(item)
+        } else if let Some(inner) = this.inner.as_mut().as_pin_mut() {
+            // Otherwise poll the `inner` async iterator.
+            inner.poll_next(cx)
+        } else {
+            // ...unless it was already dropped when we tried to buffer an item. In that case we're done.
+            PollNext::Done
+        }
+    }
+
+    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+        let mut this = self.project();
+        let Some(mut inner) = this.inner.as_mut().as_pin_mut() else {
+            // We already dropped `inner`, so we're done.
+            return Poll::Ready(());
+        };
+        if this.item.is_none() {
+            // We don't have a buffered `item`. Try to get one.
+            match inner.as_mut().poll_next(cx) {
+                PollNext::Item(item) => *this.item = Some(item),
+                // Short-circuit if `poll_next` is pending, so that we don't call `poll_progress` below.
+                PollNext::Pending => return Poll::Pending,
+                PollNext::Done => {
+                    // Drop `inner` as soon as it's done. This wasn't necessary in `poll_next`, because there
+                    // the caller is required to drop us promptly, but here there's no such requirement.
+                    this.inner.set(None);
+                    return Poll::Ready(());
+                }
+            }
+        }
+        // Either `item` was `Some` and we skipped `poll_next` above, or `poll_next` returned `Item`.
+        inner.poll_progress(cx)
+    }
+}
+```
+
+Note that when the `poll_next` method obtains an item, either from its own
+buffer or from `inner`, it returns `Item` immediately without doing any further
+polling. It might look like that violates the "`PollNext::Item` rule" above
+about polling again promptly after `Item`, however, the same rule applies to
+this method's _caller_. The caller must poll again, and when they do, `inner`
+will get polled again. Similarly, `poll_next` doesn't need to explicitly drop
+`inner`. However, `poll_progress` doesn't impose the same requirement on the
+caller, so it _does_ need `poll_progress` after `Item` and an explicit drop
+after `Done`.
+
+[`for_each`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
+
+Note also that the `poll_progress` method short-circuits if its call to
+`poll_next` returns `Pending`. That's necessary to follow the
+"`PollNext::Pending`" rule above about not calling `poll_progress` when
+`poll_next` is pending.
+
+### [`FuturesUnordered`] docs
+
+`FuturesUnordered` is an async iterator over the results of the futures it
 contains. Looping over it gives you each of the results as they arrive, and
 pending futures keep making progress concurrently with the loop body. For
 example:
@@ -176,7 +322,7 @@ B woke up` after one second, while the loop body is in the middle of its own
 two-second sleep. The output of the second `foo` future is buffered, and once
 the two-second sleep is finished, we loop around and print `got B` immediately.
 
-### How [`tokio_stream::StreamExt::merge`] might document its behavior
+### [`tokio_stream::StreamExt::merge`] docs
 
 [`tokio_stream::StreamExt::merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 
@@ -208,144 +354,6 @@ Here we see `got A` immediately, and then the loop body starts its two-second
 sleep. The other stream continues in the meantime, so we see `stream_b woke up`
 after one second, and the item `"B"` is buffered. When the two-second sleep is
 finished, we loop around and print `got B` immediately.
-
-### `AsyncIterator` API docs
-
-#### `poll_next`
-
-- `PollNext::Item(item)` means that the async iterator has successfully
-  produced an item, `item`, and may produce further items on subsequent
-  `poll_next` calls. In this case **the caller must arrange to call either
-  `poll_next` or `poll_progress` again promptly.** If the caller is another
-  `poll_next` method, it can trust its own caller to arrange this.
-
-- `PollNext::Pending` means...
-
-- `PollNext::Done` means that the async iterator has terminated, and neither
-  `poll_next` nor `poll_progress` should be invoked again.
-
-#### `poll_progress`
-
-Allows this async iterator to make progress internally, even though the next
-value is not yet needed.
-
-##### Return value
-
-- `Poll::Pending` means that more progress might be possible in the future.
-  Implementations will ensure that the current task will be notified when more
-  progress can be made.
-
-- `Poll::Ready(())` means that the async iterator has made as much internal
-  progress as it can, and `poll_progress` does not need to be invoked again
-  until the next time `poll_next` returns an item. Continuing to call
-  `poll_progress` is allowed but generally has no effect.
-
-##### Panics
-
-`poll_progress` **must not be called** after the most recent call to
-`poll_next` has returned `Pending` or after any call to `poll_next` has
-returned `Done`. Calling `poll_progress` in either of those cases may
-panic, block forever, or cause other kinds of problems; the `AsyncIterator`
-trait places no requirements on the effects of such a call. However, as the
-`poll_progress` method is not marked `unsafe`, Rust's usual rules apply: calls
-must never cause undefined behavior (memory corruption, incorrect use of
-`unsafe` functions, or the like), regardless of the async iterator's state.
-
-### Examples that might appear in "How to implement `AsyncIterator`"
-
-`Once` is an adapter that converts a `Future` into an `AsyncIterator` of one
-element. Its implementation might look like this:
-
-```rs
-pub struct Once<Fut> {
-    future: Option<Pin<Box<Fut>>>,
-}
-
-impl<Fut: Future> AsyncIterator for Once<Fut> {
-    type Item = Fut::Output;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item> {
-        if let Some(fut) = &mut self.future {
-            if let Poll::Ready(item) = fut.as_mut().poll(cx) {
-                self.future = None;
-                PollNext::Item(item)
-            } else {
-                PollNext::Pending
-            }
-        } else {
-            PollNext::Done
-        }
-    }
-
-    fn poll_progress(self: Pin<&mut Self>, _: &mut Context) -> Poll<()> {
-        assert!(self.future.is_none(), "only called after yielding an item");
-        Poll::Ready(())
-    }
-}
-```
-
-Note the `assert!` in `poll_progress`. Because `poll_progress` can only be
-called after `poll_next` yields an item, we know that `self.future` should
-already have been dropped, and `poll_progress` never needs to poll it. For the
-same reason, the `Once` struct doesn't need space to buffer an item.
-
-`MergeAll` is similar to `Once`, but it drives many futures instead of just
-one, and it iterates over all their outputs as they come. In other words, it's
-the iterator version of the future combinator [`JoinAll`]. Its implementation
-might look like this:
-
-[`JoinAll`]: https://docs.rs/futures/latest/futures/future/fn.join_all.html
-
-```rs
-pub struct MergeAll<Fut: Future> {
-    futures: Vec<Pin<Box<Fut>>>,
-    items: VecDeque<Fut::Output>,
-}
-
-impl<Fut: Future> AsyncIterator for MergeAll<Fut> {
-    type Item = Fut::Output;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item> {
-        // If we've buffered any items, yield one of those.
-        if let Some(item) = self.items.pop_front() {
-            return PollNext::Item(item);
-        }
-        // Poll the remaining futures and yield the first item we get.
-        for i in 0..self.futures.len() {
-            if let Poll::Ready(item) = self.futures[i].as_mut().poll(cx) {
-                self.futures.swap_remove(i);
-                return PollNext::Item(item);
-            }
-        }
-        if self.futures.is_empty() {
-            PollNext::Done
-        } else {
-            PollNext::Pending
-        }
-    }
-
-    fn poll_progress(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
-        let MergeAll { futures, items } = &mut *self;
-        // Poll the remaining futures and buffer all the items we get.
-        futures.retain_mut(|fut| {
-            fut.as_mut()
-                .poll(cx)
-                .map(|item| items.push_back(item))
-                .is_pending()
-        });
-        if self.futures.is_empty() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
-```
-
-Note that `poll_next` yields the first output it sees, without necessarily
-polling all the remaining futures. The caller is required to call either
-`poll_next` or `poll_progress` again promptly, so one way or another all the
-futures will get polled.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -469,12 +477,12 @@ but it's not the _only_ sort of code that async Rust aims to support.
 
 ### Why not allow `poll_progress` at any time?
 
-The third part of the three-part `AsyncIterator` contract this RFC is proposing
-is that `poll_progress` shouldn't be called when `poll_next` is pending. That
-seems kind of arbitrary. What's the point of that rule?
+The "`PollNext::Pending` rule" in the `AsyncIterator` contract this RFC is
+proposing is that `poll_progress` shouldn't be called when `poll_next` is
+pending. That seems kind of arbitrary. What's the point of that rule?
 
 Consider the `poll_progress` implementation of a combinator like [`Merge`].
-_Without_ the third rule, it could be as short as this:
+_Without_ the `PollNext::Pending` rule, it could be as short as this:
 
 ```rs
 fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
@@ -532,7 +540,7 @@ futures panic today if you poll them again after they've returned.) If any
 interleaving of `poll_next` and `poll_progress` was valid, it would be a lot
 harder to detect `AsyncIterator` contract violations programmatically.
 
-### Does `poll_next` need a new return type enum?
+### Is it worth having a whole new `PollNext` enum?
 
 Today's `Poll<Option<_>>` return type captures the three possible return states
 (item, pending, and done), but it doesn't represent anything about the
@@ -541,10 +549,10 @@ method. Rust could've defined `poll` to return `Option<Output>`, but the
 `Future` contract is important and subtle enough that it was worth adding a
 separate type to represent it.
 
-I think the same is true of `poll_next` in the new contract. The "yielded an
-item" state comes with both _permission_ to call `poll_progress` and a
-_requirement_ to call either `poll_next` or `poll_progress` again. This is
-important and subtle enough it's worth a dedicated return type.
+I think the same is true of `poll_next` in the new contract. The
+"`PollNext::Item` rule" and the "`PollNext::Pending` rule" are are important
+and subtle enough that's it's worth defining a distinct return type to
+represent them.
 
 ## Prior art
 [prior-art]: #prior-art
