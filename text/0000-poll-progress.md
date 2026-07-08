@@ -215,7 +215,8 @@ most surprising. Expanding on those:
   keep driving its other children with `poll_next` internally until each of
   them has yielded an item. This ensures the smooth flow of control through
   chains of combinators, and it means that non-concurrent combinators don't
-  need to allocate buffer space for an item.
+  need to allocate buffer space for an item. The rationales section [discusses
+  this rule further](#why-not-allow-poll_progress-at-any-time).
 
 Let's look at the implementation of an async iterator combinator, `Buffer1`,
 which wraps another `AsyncIterator` and pre-fetches the next item in
