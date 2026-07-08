@@ -358,13 +358,80 @@ finished, we loop around and print `got B` immediately.
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
 
-This is the technical portion of the RFC. Explain the design in sufficient detail that:
+### `for await`
 
-- Its interaction with other features is clear.
-- It is reasonably clear how the feature would be implemented.
-- Corner cases are dissected by example.
+We can't de-sugar this RFC's version of `for await` syntax into a loop (the way
+the Reference does for [the `for` keyword][for]), because we'd need to treat
+the body as a future (e.g. `await { /* body */ }`) to intercept `Pending` and
+call `poll_progress` in the right place, but that's incompatible with `return`,
+`?`, `break`, or `continue` in the body.
 
-The section should return to the examples given in the previous section, and explain more fully how the detailed proposal makes those examples work.
+[for]: https://doc.rust-lang.org/reference/expressions/loop-expr.html#r-expr.loop.for.desugar
+
+Instead we could specify `for await` abstractly, [the way `.await` is
+specified][await]:
+
+[await]: https://doc.rust-lang.org/reference/expressions/await-expr.html#r-expr.await.effects
+
+1. Create an async iterator by calling `IntoAsyncIterator::into_async_iter` on
+   the iterator expression.
+2. Pin the async iterator using `Pin::new_unchecked`.
+3. Poll it by calling the `AsyncIterator::poll_next` method and passing it the
+   current task context.
+4. If the call to `poll_next` returns `PollNext::Pending`, then the surrounding
+   async context returns `Poll::Pending` (or in an `async gen fn`,
+   `PollNext::Pending`), suspending its state so that, when it's re-polled,
+   execution returns to step 3.
+5. If the call to `poll_next` returns `PollNext::Done`, then loop drops the
+   async iterator and evaluates to `()`.
+6. If the call to `poll_next` returns `PollNext::Item(item)`, then `item` is
+   matched against the irrefutable `PATTERN`.
+7. Control proceeds through the loop body, with the bindings from `PATTERN` in
+   scope. If any `.await` expression or `for await` item (i.e. step 3 above, if
+   another `for await` loop is nested within this one) in the body is pending,
+   call `poll_progress` on the async iterator before reporting pending from the
+   surrounding async context.
+8. \[`break`, `continue`, and diverging control flow as usual\]
+
+Note that if `for await` loops are nested, a pending expression in an inner
+loop triggers step 7 above for _all_ the containing loops, starting with the
+innermost.
+
+### `async gen fn`
+
+An `async gen fn` returns an `AsyncIterator` implementation. If control in the
+`async gen fn` is at a `yield` (not an `.await`) in the body of a `for await`
+loop, then the `poll_progress` method on the returned `AsyncIterator` calls
+`poll_progress` on that loops iterator. Note that if `for await` loops are
+nested, there may be multiple such iterators, and `poll_progress` gets
+forwarded to all of them, starting with the innermost.
+
+Note that when control is suspended at a pending `.await` in an `async gen fn`,
+`poll_progress` will not be called on the returned `AsyncIterator`, because the
+last call to its `poll_next` method did not return `Item`. (Concretely, if its
+caller is using `for await`, the caller is currently in step 3 above, not step
+7.) In that case, it's the returned `AsyncIterator`'s `poll_next` method that's
+responsible for driving progress in any other async iterators it's looping
+over, following the rules in the previous section.
+
+For example:
+
+```rs
+async gen fn foo() {
+    for await _ in bar() {
+        for await _ in baz() {
+            // While this expression is pending, `foo`'s `poll_next` function calls `poll_progress` on the
+            // `bar` and `baz` async iterators before reporting pending itself. The `AsyncIterator` contract
+            // guarantees that `foo`'s `poll_progress` function will not be called in this state.
+            do_work().await;
+            // While control is suspended at this `yield`, `foo`'s `poll_progress` function calls
+            // `poll_progress` on the `bar` and `baz` async iterators, and it reports pending if either of
+            // those calls is pending.
+            yield;
+        }
+    }
+}
+```
 
 ## Drawbacks
 [drawbacks]: #drawbacks
