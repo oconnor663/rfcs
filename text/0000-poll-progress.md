@@ -631,9 +631,12 @@ them.
 Various approaches to this feature, and the hangs and deadlocks that motivate
 it, have been discussed for many years. Some points of reference:
 
+- ["Footgun lurking in `FuturesUnordered` and other concurrency-enabling streams"](https://github.com/rust-lang/futures-rs/issues/2387)
 - ["Barbara battles buffered streams"][barbara]
 - ["`for await` and the battle of buffered streams"](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
 - https://without.boats/blog/poll-progress
+- ["A discussion prototype for `AsyncIterator`"](https://hackmd.io/EplPcmBCTCSQ9LPOU6IZDw) and related [meeting notes](https://hackmd.io/bYaPiCdqR3WIyjKhFWzdtQ)
+- ["Future's liveness problem"](https://skepfyr.me/blog/futures-liveness-problem/)
 - ["Futurelock"][futurelock]
 - ["Never snooze a future"](https://jacko.io/snooze.html)
 
