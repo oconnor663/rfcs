@@ -427,11 +427,11 @@ be impractical.
 
 In these difficult cases, it's possible to recreate the `next` method in a
 `poll_progress`-compatible way using a macro. Here is a [working
-proof-of-concept](https://github.com/oconnor663/drive_async_iterator). The key
-is that the macro takes ownership of the async iterator and provides a handle
-with a `next` method on it, which lets the macro call `poll_progress`
-concurrently with its body as needed. Apart from easing migration, a macro like
-this also fixes [potential deadlocks in the loop above][loop_select_deadlock].
+proof-of-concept][drive]. The key is that the macro takes ownership of the
+async iterator and provides a handle with a `next` method on it, which lets the
+macro call `poll_progress` concurrently with its body as needed. Apart from
+easing migration, a macro like this also fixes [potential deadlocks in the loop
+above][loop_select_deadlock].
 
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
@@ -651,7 +651,9 @@ async gen fn foo() {
 
 What it there was some hypothetical built-in syntax for writing the `async fn`
 above? Maybe it could support error handling and other short-circuiting
-operations (`break`, `continue`) more gracefully:
+operations (`break`, `continue`) more gracefully. (Tangent: Maybe it could even
+allow conflicting mutable borrows on both sides, as long as they don't cross an
+`.await`!?)
 
 ```rs
 async fn bar() -> anyhow::Result<()> {
@@ -664,7 +666,8 @@ async fn bar() -> anyhow::Result<()> {
 }
 ```
 
-What if that hypothetical syntax supported _yielding_? What might _this_ do?
+What if that hypothetical syntax also supported _yielding_? What might _this_
+do?
 
 ```rs
 async gen fn bar() -> u32 {
@@ -699,25 +702,59 @@ impl AsyncIteratorExt {
 
 ### Generalized coroutines
 
-...
+We can imagine a more general "coroutine" version of `Iterator` and
+`AsyncIterator`, which (as in e.g. Python) takes inputs in addition to yielding
+items, and which also has a final return value. Not that we should necessarily
+_implement_ such a feature, but it might be useful to keep the idea in mind.
 
-Think about what the natural extension and evolution of your proposal would
-be and how it would affect the language and project as a whole in a holistic
-way. Try to use this section as a tool to more fully consider all possible
-interactions with the project and language in your proposal.
-Also consider how this all fits into the roadmap for the project
-and of the relevant sub-team.
+There are a couple of unused value spots in the `for` and `for await` syntax:
 
-This is also a good place to "dump ideas", if they are out of scope for the
-RFC you are writing but otherwise related.
+```rs
+for await item in iter {
+    do_stuff(item).await;
+    // The value of the body is always `()`.
+} // The value of the loop itself is always `()`.
+```
 
-If you have tried and cannot think of any future possibilities,
-you may simply state that you cannot think of anything.
+Similarly, there are a couple of unused value spots in the likely `gen` and
+`async gen` syntax:
 
-Note that having something written down in the future-possibilities section
-is not a reason to accept the current or a future RFC; such notes should be
-in the section on motivation or rationale in this or subsequent RFCs.
-The section merely provides additional information.
+```rs
+async gen fn foo() -> u32 {
+    yield 1; // The value of the `yield` expression is always `()`.
+    // The return value of the function is always `()`.
+}
+```
+
+These spots map surprisingly cleanly to the concept of a "coroutine" in
+languages like Python. In the `gen fn` / `async gen fn` syntax, input items
+become the value of the currently suspended `yield` expression, and the final
+value comes from the return value of the body. In the `for` / `for await`, the
+final value could become the value of the loop itself, and the input items
+could come from the value of the body. (This would suggest that `break` would
+need a value of the same type as the final value, and `continue` would need a
+value of the same type as the inputs.)
+
+The async coroutine equivalent of `PollNext` might have a second type parameter
+for the final value:
+
+```rs
+enum CoroutinePollNext<Item, Return> {
+    Item(Item),
+    Pending,
+    Done(Return),
+}
+```
+
+An async coroutine trait might look very similar to the version of
+`AsyncIterator` proposed here. It would need a third method called something
+like `send`, and perhaps the contract would be that you must call `send` once
+at some point after each `Item`, before calling `poll_next` again. A `for await
+coroutine` loop or whatever it might be called wouldn't have an obvious way to
+enable concurrency between the coroutine and the body (a wrapper type like
+`Buffer1` above would need a way to come up with input values, which might be
+possible in some cases), but [more complicated macros][drive] might be able to
+do fun things.
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
@@ -725,3 +762,4 @@ The section merely provides additional information.
 [`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
+[drive]: https://github.com/oconnor663/drive_async_iterator
