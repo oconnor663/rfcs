@@ -327,7 +327,7 @@ the two-second sleep is finished, we loop around and print `got B` immediately.
 
 [`tokio_stream::StreamExt::merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 
-Combine two streams into one by interleaving the output of both as it is
+Combine two streams into one by interleaving the outputs of both as they're
 produced. When one side of the merge yields an item, the other side continues
 making progress in the background until it also yields an item. For example:
 
@@ -369,8 +369,8 @@ call `poll_progress` in the right place, but that's incompatible with `return`,
 
 [for]: https://doc.rust-lang.org/reference/expressions/loop-expr.html#r-expr.loop.for.desugar
 
-Instead we could specify `for await` abstractly, [the way `.await` is
-specified][await]:
+Instead we can describe the steps `for await` takes internally, [the same way
+`.await` is described][await]:
 
 [await]: https://doc.rust-lang.org/reference/expressions/await-expr.html#r-expr.await.effects
 
@@ -405,7 +405,9 @@ An `async gen fn` returns an `AsyncIterator` implementation. If control in the
 loop, then the `poll_progress` method on the returned `AsyncIterator` calls
 `poll_progress` on that loop's iterator. Note that if `for await` loops are
 nested, there may be multiple such iterators, and `poll_progress` gets
-forwarded to all of them, starting with the innermost.
+forwarded to all of them, starting with the innermost. If any of the forwarded
+`poll_progress` calls is pending, then `poll_progress` on the returned
+`AsyncIterator` also returns `Pending`, otherwise it returns `Ready`.
 
 Note that when control is suspended at a pending `.await` in an `async gen fn`,
 `poll_progress` will not be called on the returned `AsyncIterator`, because the
@@ -508,9 +510,10 @@ above][loop_select_deadlock].
 
 ### Is pausing futures at `.await` points so terrible? Could we instead agree to allow it?
 
-The fundamental assumption of this RFC is that we need to guarantee continuous
-control flow through async code. Async control flow can include cancellation
-via `Drop`, but indefinite pauses shouldn't be possible.
+The fundamental assumption of this RFC is that we need to guarantee smooth
+control flow through async code. Concretely, `Future` and `AsyncIterator`
+implementations should be able to assume that they'll be polled again promptly
+(or dropped) whenever they invoke their `Waker`.
 
 Is that a good assumption? Do we have consensus on that? What are the other
 options?
@@ -555,7 +558,7 @@ _Without_ the `PollNext::Pending` rule, it could be as short as this:
 ```rs
 fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
     let this = self.project();
-    // XXX: This version doesn't keep track of whether `poll_next` is pending.
+    // XXX: This version doesn't keep track of whether each child's `poll_next` is pending.
     let poll1 = this.left.poll_progress(cx);
     let poll2 = this.right.poll_progress(cx);
     any_pending([poll1, poll2])
@@ -682,9 +685,10 @@ nothing. Would any callers care? Does anyone really need to know whether
 ### Concurrency syntax for the body of an `async gen fn`
 
 Today we can only introduce concurrency into async iteration by using
-combinators like `Merge`, which are written "by hand" using the `AsyncIterator`
-API. We can't write a concurrent program using `for await` and `async gen fn`
-by themselves. But it's interesting to consider how that could change.
+combinators like `Merge` or `Buffer1`, which are written "by hand" using the
+`AsyncIterator` API. We can't write a concurrent program using just `for await`
+and `async gen fn` by themselves. But it's interesting to consider how that
+could change.
 
 An `async fn` (not a generator) can get concurrency in its body using a `join!`
 macro, which is "almost like syntax". For example:
@@ -797,11 +801,11 @@ async gen fn foo() -> u32 {
 These spots map surprisingly cleanly to the concept of a "coroutine" in
 languages like Python. In the `gen fn` / `async gen fn` syntax, input items
 become the value of the currently suspended `yield` expression, and the final
-value comes from the return value of the body. In the `for` / `for await`, the
-final value could become the value of the loop itself, and the input items
-could come from the value of the body. (This would suggest that `break` would
-need a value of the same type as the final value, and `continue` would need a
-value of the same type as the inputs.)
+value comes from the return value of the body. In the `for` / `for await`
+syntax, the final value could become the value of the loop itself, and the
+input items could come from the value of the body. (This would suggest that
+`break` would need a value of the same type as the final value, and `continue`
+would need a value of the same type as the inputs.)
 
 The async coroutine equivalent of `PollNext` might have a second type parameter
 for the final value:
