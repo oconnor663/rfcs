@@ -497,7 +497,7 @@ sit at the core of larger application loops, and migrating away from them can
 be impractical.
 
 In these difficult cases, it's possible to recreate the `next` method in a
-`poll_progress`-compatible way using a macro. Here is a [working
+`poll_progress`-compatible way using a macro. Here's a [working
 proof-of-concept][drive], which takes ownership of an async iterator and
 provides a handle with `next` and `with_mut` methods on it. Apart from easing
 migration, the macro also fixes [potential deadlocks in the loop
@@ -548,9 +548,9 @@ _only_ sort of code that async Rust aims to support.
 
 ### Why not allow `poll_progress` at any time?
 
-The "`PollNext::Pending` rule" in the `AsyncIterator` contract this RFC is
-proposing is that `poll_progress` shouldn't be called when `poll_next` is
-pending. That seems kind of arbitrary. What's the point of that rule?
+The "`PollNext::Pending` rule" says that `poll_progress` shouldn't be called
+when `poll_next` is pending. That seems kind of arbitrary. What's the point of
+that rule?
 
 Consider the `poll_progress` implementation of a combinator like [`Merge`].
 _Without_ the `PollNext::Pending` rule, it could be as short as this:
@@ -603,13 +603,32 @@ callee. Rather than adding complexity and buffer slots to concurrent async
 iterators like `Merge` and [`StreamMap`], we'd add complexity and buffer slots
 to _every_ async iterator.
 
-Also, if the `AsyncIterator` contract is going to be somewhat subtle and
-error-prone either way, a major upside of the rule as proposed is that it's
-clear when it's been violated, and we can enforce it with `debug_assert!`s.
-(`async gen fn` should handle violations by panicking, just like `async fn`
-futures panic today if you poll them again after they've returned.) If any
-interleaving of `poll_next` and `poll_progress` was valid, it would be a lot
-harder to detect `AsyncIterator` contract violations programmatically.
+With the `PollNext::Pending` rule, we don't get to write the simple version of
+`Merge::poll_progress` above, and instead we have to do some tricky state
+tracking and conditional buffering there. That's a downside. The upside is that
+`Then::poll_progress` gets to look like this:
+
+```rs
+fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+    let this = self.project();
+    debug_assert!(this.future.is_none());
+    this.stream.poll_progress(cx)
+}
+```
+
+`Then::poll_progress` doesn't need to worry about what to do with `self.future`
+or its output, because it can only be called when `self.future` is `None`.
+Simple combinators like `Map` and `Then` (and `Filter` and `Flatten` and `Skip`
+and `Take`) are more common than concurrent ones like `Merge` and `Buffer1`,
+both in terms of how many implementations we need to write and in terms of how
+often they appear in long chains of combinators. Keeping the simple things
+simple is a good trade.
+
+Another upside of the `PollNext::Pending` rule compared to the alternative is
+that it's clear when it's been violated, and we can write asserts like the one
+above. An `async gen fn` should probably panic if we call `poll_progress` while
+it's suspended at an `.await`, just like an `async fn` panics today if we poll
+it again after it's returned.
 
 ### Is it worth having a whole new `PollNext` enum?
 
