@@ -95,11 +95,12 @@ same problem.
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
-futures they contain. That means that `for await` and other combinators need a
-way to let an iterator make progress, even when they're not ready to accept
-another item. The new `poll_progress` method is how they can do this. It comes
-with new contract requirements, and to emphasize those we'll change the return
-type of `poll_next` from `Poll<Option<_>>` to a dedicated `PollNext` enum.
+futures they contain. That means that `for await` and other consumers and
+combinators need a way to let an iterator make progress, even when they're not
+ready to accept another item. The new `poll_progress` method is how they can do
+this. It comes with new contract requirements, and to emphasize those we'll
+change the return type of `poll_next` from `Poll<Option<_>>` to a dedicated
+`PollNext` enum.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -107,16 +108,16 @@ type of `poll_next` from `Poll<Option<_>>` to a dedicated `PollNext` enum.
 ### `AsyncIterator` intro
 
 As its name suggests, `AsyncIterator` is the async version of [`Iterator`].
-Just like `Iterator` is the trait at the heart of `for` loops and many other
-kinds of iteration, `AsyncIterator` is the trait at the heart of `for await`
-loops and many other kinds of asynchronous iteration.
+Just like `Iterator` is the trait at the heart of `for` loops and other forms
+of iteration, `AsyncIterator` is the trait at the heart of `for await` loops
+and other forms of asynchronous iteration.
 
 [`Iterator`]: https://doc.rust-lang.org/std/iter/trait.Iterator.html
 
 Async code can and often does use regular iterators and `for` loops too, as
-long as producing their next item never blocks, like loops over a range or a
-collection. But async functions aren't allowed to do blocking IO, and they
-can't use regular iterators that sometimes block, for example
+long as their next item is always immediately available, like loops over a
+range or a collection. But async functions aren't allowed to do blocking IO,
+and they can't use regular iterators that sometimes block, for example
 [`std::io::Lines`] or [`std::sync::mpsc::Iter`]. The main purpose of
 `AsyncIterator` is to support iterators like these that sometimes need to wait
 on input, in a way that's compatible with async code.
@@ -124,9 +125,9 @@ on input, in a way that's compatible with async code.
 [`std::io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
 [`std::sync::mpsc::Iter`]: https://doc.rust-lang.org/std/sync/mpsc/struct.Iter.html
 
-In addition, async iterators have a special ability that regular iterators
-generally do not. They can keep doing work "in the background" while the caller
-is processing an item. For example:
+In addition, async iterators have a superpower that regular iterators generally
+do not. They can keep working "in the background" while the caller is
+processing an item. For example:
 
 ```rs
 for await jpeg in fetch_images() {
@@ -134,13 +135,13 @@ for await jpeg in fetch_images() {
 }
 ```
 
-Depending on how it's implemented, the async iterator returned by
-`fetch_images` could start downloading the next `jpeg` concurrently while
-control is inside `save_image`. A regular iterator would need to use threads to
-do that, which complicates borrowing and short-circuiting and usually requires
-heap allocation. But async iterators can do concurrent background work without
-threads or allocations, and with full support for local borrowing and intuitive
-behavior for `break` and `return` (cancelling the background work).
+Depending on how it's implemented, `fetch_images` could start downloading the
+next `jpeg` concurrently while control is inside `save_image`. A regular
+iterator would need to use threads to do that, which complicates borrowing and
+short-circuiting and usually requires heap allocation. But async iterators can
+do concurrent background work without threads or allocations, and with full
+support for local borrowing and intuitive behavior for `break` and `return`
+(cancelling the background work).
 
 ### Implementing `AsyncIterator`
 
@@ -203,8 +204,8 @@ most surprising. Expanding on those:
   expect it to register any wakeups. That's important for performance, because
   there might be many items ready to return, and we don't want to trigger
   redundant wakeups for each of them or cause an extra round trip through the
-  executor. On the flip side, once we don't want to call `poll_next` any more,
-  we need to call `poll_progress` once to cue the iterator to finish its own
+  executor. On the flip side, if we don't want to call `poll_next` any more, we
+  need to call `poll_progress` to give the iterator a chance to finish its own
   polling responsibilities and register wakeups.
 - **The `PollNext::Pending` rule:** When `poll_next` is pending, we have to
   `poll_next` again at the next wakeup; we can't "change our minds" about
@@ -215,7 +216,7 @@ most surprising. Expanding on those:
   keep driving its other children with `poll_next` internally until each of
   them has yielded an item. This ensures the smooth flow of control through
   chains of combinators, and it means that non-concurrent combinators don't
-  need to allocate buffer space for an item. The rationales section [discusses
+  need to allocate buffer space for an item. The rationale section [discusses
   this rule further](#why-not-allow-poll_progress-at-any-time).
 
 Let's look at the implementation of an async iterator combinator, `Buffer1`,
@@ -497,10 +498,9 @@ be impractical.
 
 In these difficult cases, it's possible to recreate the `next` method in a
 `poll_progress`-compatible way using a macro. Here is a [working
-proof-of-concept][drive]. The key is that the macro takes ownership of the
-async iterator and provides a handle with a `next` method on it, which lets the
-macro call `poll_progress` concurrently with its body as needed. Apart from
-easing migration, a macro like this also fixes [potential deadlocks in the loop
+proof-of-concept][drive], which takes ownership of an async iterator and
+provides a handle with `next` and `with_mut` methods on it. Apart from easing
+migration, the macro also fixes [potential deadlocks in the loop
 above][loop_select_deadlock].
 
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
@@ -534,7 +534,7 @@ that might be held across an `.await`, the story is the same. In
 ["Futurelock"][futurelock] for example, it was a semaphore buried inside
 Tokio's channel implementation. If async Rust code has to tolerate indefinite
 pauses, then we need to be defensive about futurelocks everywhere, and writing
-async applications starts to feel like writing Unix signal handlers.
+async applications will start to feel like writing Unix signal handlers.
 
 Could there be a third way? Maybe there could be some sort of `Drop`-like hook
 that tells futures and async iterators when they're about to be paused or
@@ -542,9 +542,9 @@ resumed. I haven't explored this in any detail, but my first question would be:
 "If I'm holding a lock, what am I supposed to do in that hook? Release the
 lock?" The point of locking is that it lets us group operations together
 atomically. If a lock can be _stolen_ from us in the middle of our critical
-section, then it isn't really a lock at all. Realistically, this third way
-would have to look more like lock-free programming. Lock-free code is great,
-but it's not the _only_ sort of code that async Rust aims to support.
+section, then it isn't a lock at all. Realistically, this third way would look
+more like lock-free programming. Lock-free code is great, but it's not the
+_only_ sort of code that async Rust aims to support.
 
 ### Why not allow `poll_progress` at any time?
 
@@ -599,9 +599,9 @@ In practice, the bookkeeping for "if `poll_next` has been called at least once,
 `poll_progress` advances control to the next yield and buffers an item" would
 look awfully similar to the bookkeeping for "don't call `poll_progress` when
 `poll_next` is pending", except moved down a level from the caller to the
-callee. Rather than adding complexity and buffer slots only to concurrent async
+callee. Rather than adding complexity and buffer slots to concurrent async
 iterators like `Merge` and [`StreamMap`], we'd add complexity and buffer slots
-to _every_ async iterator. Not a good trade.
+to _every_ async iterator.
 
 Also, if the `AsyncIterator` contract is going to be somewhat subtle and
 error-prone either way, a major upside of the rule as proposed is that it's
