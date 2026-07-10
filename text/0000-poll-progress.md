@@ -586,11 +586,11 @@ next `yield`. If it did, then `for await` loops would always drive their
 iterators concurrently with their loop bodies, which isn't how they're supposed
 to work. Instead, `foo` would need to track whether `poll_next` has been called
 _at least once_ before allowing control to enter the body, and before allowing
-control to proceed after a `yield`. That's certainly doable, but consider
-applying the same logic to existing combinators like [`Map`] and [`Then`].
-Those would need to add a state flag that they don't have today (say
-`next_item_wanted`), and they'd also need a rarely-used buffer slot for an
-item.
+control to proceed after a `yield`. That's doable, but consider applying the
+same logic to existing combinators like [`Map`] and [`Then`]. Those would need
+to add a state flag that they don't have today (say `next_item_wanted`), and
+they'd also need a rarely-used buffer slot for an item. (More on this
+counterfactual in the next section.)
 
 [`Map`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.map
 [`Then`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.then
@@ -629,6 +629,100 @@ that it's clear when it's been violated, and we can write asserts like the one
 above. An `async gen fn` should probably panic if we call `poll_progress` while
 it's suspended at an `.await`, just like an `async fn` panics today if we poll
 it again after it's returned.
+
+### What was that about `next_item_wanted`? Why would `Map` need that?
+
+This is a specific point from the previous section that I want to elaborate on,
+because it's hard to follow without example code. Without the
+`PollNext::Pending` rule, the "obvious" way to implement `poll_progress` for
+most combinators is subtly incorrect. Consider a toy async iterator adapter
+that prints out each element as it goes (i.e. an adapter with side effects).
+Here's the `async gen fn` version:
+
+```rs
+async gen fn print_each<Iter>(iter: Iter) -> Iter::Item
+where
+    Iter: IntoAsyncIterator,
+    Iter::Item: Debug,
+{
+    for await item in iter {
+        eprintln!("yielding an item: {item:?}");
+        yield item;
+    }
+}
+```
+
+And here's the same thing expressed as a regular function returning a [`Map`]:
+
+```rs
+fn print_each<Iter>(iter: Iter) -> impl AsyncIterator<Item = Iter::Item>
+where
+    Iter: IntoAsyncIterator,
+    Iter::Item: Debug,
+{
+    iter.into_async_iter().map(|item| {
+        eprintln!("yielding an item: {item:?}");
+        item
+    })
+}
+```
+
+These two implementations should have identical behavior, and under the
+"`PollNext::Pending` rule" I think they naturally would. But in the
+counterfactual world without that rule, where callers can switch to calling
+`poll_progress` when `poll_next` is pending (e.g. on the losing side of a
+`Merge`), this gets tricky. We know that to prevent deadlocks, we can't leave
+control suspended at an `.await` point in an `async gen fn`, so we'd still
+expect `poll_progress` to drive control through the next `eprintln!` and up to
+the next `yield`. But would `Map::poll_progress` do the same? That depends.
+Does it look like this?
+
+```rs
+fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+    self.project().stream.poll_progress(cx)
+}
+```
+
+That's similar to `Then::poll_progress` from the previous section, and it's a
+correct implementation under the `PollNext::Pending` rule. But without that
+rule, that implementation will _not_ behave like the `async gen fn`, because it
+won't run the `f` closure in the background. Even though the yielded items are
+ultimately the same, the observable side effects occur at different times. For
+`Map` to behave identically to the `async gen fn` in this "caller switches to
+`poll_progress` but we still want control to flow to the next `yield`"
+counterfactual, `Map::poll_progress` would need to look like this instead:
+
+```rs
+fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
+    let mut this = self.project();
+    let Some(mut inner) = this.inner.as_mut().as_pin_mut() else {
+        return Poll::Ready(());
+    };
+    // `next_item_wanted` is set and cleared in `poll_next`.
+    if this.item.is_none() && *this.next_item_wanted {
+        match inner.as_mut().poll_next(cx) {
+            // Invoke the `f` closure as soon as an item is available.
+            PollNext::Item(item) => *this.item = Some(this.f(item)),
+            PollNext::Pending => return Poll::Pending,
+            PollNext::Done => {
+                this.inner.set(None);
+                return Poll::Ready(());
+            }
+        }
+    }
+    inner.poll_progress(cx)
+}
+```
+
+That might look familiar. It's `Buffer1::poll_progress` from the "Implementing
+`AsyncIterator`" section, with the addition of the `f` closure and a
+`next_item_wanted` flag to make it non-concurrent. I'm ok with `Buffer1` being
+this complicated -- it's a concurrent combinator, whizz bang razzle dazzle --
+but if `Map` is this complicated, it's a sign that the contract is bad.
+Maintaining an extra flag to _avoid_ accidental concurrency also feels weird
+and backwards. Realistically, if this was what the `AsyncIterator` contract
+called for, then in practice we'd expect missed wakeups and/or unintentional
+concurrency all over the place.
 
 ### Is it worth having a whole new `PollNext` enum?
 
