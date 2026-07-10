@@ -210,14 +210,14 @@ most surprising. Expanding on those:
 - **The `PollNext::Pending` rule:** When `poll_next` is pending, we have to
   `poll_next` again at the next wakeup; we can't "change our minds" about
   wanting an item and switch to `poll_progress`. (The only valid way to change
-  our minds is to cancel the whole iterator by dropping it.) This mainly
-  affects concurrent combinators that "merge" multiple async iterators
-  together. After a child iterator yields an item, such a combinator should
-  keep driving its other children with `poll_next` internally until each of
-  them has yielded an item. This ensures the smooth flow of control through
-  chains of combinators, and it means that non-concurrent combinators don't
-  need to allocate buffer space for an item. The rationale section [discusses
-  this rule further](#why-not-allow-poll_progress-at-any-time).
+  our minds is to cancel the whole iterator by dropping it.) This rule is aimed
+  at concurrent combinators that "merge" multiple async iterators together.
+  After a child iterator yields an item, such a combinator should keep driving
+  its other children with `poll_next` internally until each of them has yielded
+  an item. This ensures the smooth flow of control through chains of
+  combinators, and it means that non-concurrent combinators don't need to
+  allocate buffer space for an item. The rationale section [discusses this rule
+  further](#why-not-allow-poll_progress-at-any-time).
 
 Let's look at the implementation of an async iterator combinator, `Buffer1`,
 which wraps another `AsyncIterator` and pre-fetches the next item in
