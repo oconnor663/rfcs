@@ -200,13 +200,14 @@ at any time.
 The first two requirements in the table above are bolded, because they're the
 most surprising. Expanding on those:
 
-- **The `PollNext::Item` rule:** When `poll_next` returns an item, we don't
-  expect it to register any wakeups. That's important for performance, because
+- **The `PollNext::Item` rule:** When `poll_next` returns an item, it's not
+  required to register any wakeups. That's important for performance, because
   there might be many items ready to return, and we don't want to trigger
   redundant wakeups for each of them or cause an extra round trip through the
-  executor. On the flip side, if we don't want to call `poll_next` any more, we
-  need to call `poll_progress` to give the iterator a chance to finish its own
-  polling responsibilities and register wakeups.
+  executor. On the flip side, if/when we don't want to call `poll_next` any
+  more, we need to call `poll_progress` before returning pending ourselves, to
+  give the iterator a chance to finish its own polling responsibilities and
+  register wakeups.
 - **The `PollNext::Pending` rule:** When `poll_next` is pending, we have to
   `poll_next` again at the next wakeup; we can't "change our minds" about
   wanting an item and switch to `poll_progress`. (The only valid way to change
