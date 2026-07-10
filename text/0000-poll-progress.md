@@ -251,43 +251,45 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
     fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         let mut this = self.project();
         let Some(mut inner) = this.inner.as_mut().as_pin_mut() else {
-            // We already dropped `inner`, so we're done.
+            // The `inner` iterator is already done.
             return Poll::Ready(());
         };
         if this.item.is_none() {
             // We don't have a buffered `item`. Try to get one.
             match inner.as_mut().poll_next(cx) {
-                PollNext::Item(item) => *this.item = Some(item),
-                // Short-circuit if `poll_next` is pending, so that we don't call `poll_progress` below.
-                PollNext::Pending => return Poll::Pending,
+                PollNext::Item(item) => {
+                    *this.item = Some(item);
+                    inner.poll_progress(cx) // required
+                }
+                PollNext::Pending => Poll::Pending,
                 PollNext::Done => {
-                    // Drop `inner` as soon as it's done. This wasn't necessary in `poll_next`, because there
-                    // the caller is required to drop us promptly, but here there's no such requirement.
-                    this.inner.set(None);
-                    return Poll::Ready(());
+                    this.inner.set(None); // required
+                    Poll::Ready(())
                 }
             }
+        } else {
+            // We already have a buffered `item`.
+            inner.poll_progress(cx)
         }
-        // Either `item` was `Some` and we skipped `poll_next` above, or `poll_next` returned `Item`.
-        inner.poll_progress(cx)
     }
 }
 ```
 
-Note that when the `poll_next` method obtains an item, either from its own
-buffer or from `inner`, it returns `Item` immediately without doing any further
-polling. It might look like that violates the "`PollNext::Item` rule" above
-about polling again promptly after `Item`, however, the same rule applies to
-this method's _caller_. The caller must poll again, and when they do, `inner`
-will get polled again. Similarly, `poll_next` doesn't need to explicitly drop
-`inner`. However, `poll_progress` doesn't impose the same requirement on the
-caller, so it _does_ need `poll_progress` after `Item` and an explicit drop
-after `Done`.
+Note that when `inner.poll_next` returns `Item`, `Buffer1::poll_next` returns
+immediately without doing any further polling. That might look like it violates
+the "`PollNext::Item` rule" about polling again promptly, however, the same
+rule applies _to the caller_. The caller will poll again, and when they do,
+`inner` will get polled again. Similarly, `Buffer1::poll_next` doesn't need to
+drop `inner` when it returns `Done`, because the caller will drop the whole
+`Buffer1`. However, `Buffer1::poll_progress` doesn't impose the same rule on
+its caller, so it must call `inner.poll_progress` in its `Item` branch and drop
+`inner` in its `Done` branch.
 
-Note also that the `poll_progress` method short-circuits if its call to
-`poll_next` returns `Pending`. That's necessary to follow the
-"`PollNext::Pending`" rule above about not calling `poll_progress` when
-`poll_next` is pending.
+Note also that `Buffer1::poll_progress` doesn't call `inner.poll_progress`
+after `inner.poll_next` returns `Pending`. That's the "`PollNext::Pending`
+rule". The next poll will be either `Buffer1::poll_next` if the caller asks for
+another item, or else `Buffer1::poll_progress` calling `inner.poll_next` again
+after a wakeup.
 
 ### [`FuturesUnordered`] docs
 
@@ -618,11 +620,12 @@ fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
 
 `Then::poll_progress` doesn't need to worry about what to do with `self.future`
 or its output, because it can only be called when `self.future` is `None`.
-Simple combinators like `Map` and `Then` (and `Filter` and `Flatten` and `Skip`
-and `Take`) are more common than concurrent ones like `Merge` and `Buffer1`,
-both in terms of how many implementations we need to write and in terms of how
-often they appear in long chains of combinators. Keeping the simple things
-simple is a good trade.
+Similarly, it never needs to call `stream.poll_next`, because it will never be
+called after `poll_next` returns `Pending`. Simple combinators like `Map` and
+`Then` (and `Filter` and `Flatten` and `Skip` and `Take`) are more common than
+concurrent ones like `Merge` and `Buffer1`, both in terms of how many
+implementations we need to write and also how many instances appear in chains
+of combinators. Keeping the simple things simple is a good trade.
 
 Another upside of the `PollNext::Pending` rule compared to the alternative is
 that it's clear when it's been violated, and we can write asserts like the one
