@@ -613,9 +613,8 @@ tracking and conditional buffering there. That's a downside. The upside is that
 
 ```rs
 fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
-    let this = self.project();
-    debug_assert!(this.future.is_none());
-    this.stream.poll_progress(cx)
+    debug_assert!(self.future.is_none());
+    self.project().stream.poll_progress(cx)
 }
 ```
 
