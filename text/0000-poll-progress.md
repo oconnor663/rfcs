@@ -779,19 +779,17 @@ async gen fn bar() -> u32 {
 Could you implement `merge` like _this_?
 
 ```rs
-impl AsyncIteratorExt {
-    async gen fn merge<Other>(self, other: Other) -> Self::Item
-    where
-        Other: IntoAsyncIterator<Item = Self::Item>,
-    {
-        await all {
-            for await item in self {
-                yield item;
-            }
-        } and {
-            for await item in other {
-                yield item;
-            }
+async gen fn merge<Other>(self, other: Other) -> Self::Item
+where
+    Other: IntoAsyncIterator<Item = Self::Item>,
+{
+    await all {
+        for await item in self {
+            yield item;
+        }
+    } and {
+        for await item in other {
+            yield item;
         }
     }
 }
