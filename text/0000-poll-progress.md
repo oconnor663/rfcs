@@ -131,7 +131,7 @@ processing an item. For example:
 
 ```rs
 for await jpeg in fetch_images() {
-    save_image(jpeg).await?;
+    save_image(jpeg).await;
 }
 ```
 
