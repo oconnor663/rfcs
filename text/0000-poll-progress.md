@@ -508,6 +508,38 @@ above][loop_select_deadlock].
 
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
+### What about "lending" async iterators?
+
+A hypothetical `LendingAsyncIterator` would yield items that borrow the
+iterator itself. That would let us share a mutable buffer between items, for
+example, in exchange for not being allowed to `collect` those items. RFC 2996
+[discusses this possibility][lending], and the [stabilization of GATs][gats]
+has made it possible to express the lifetimes that a `LendingAsyncIterator` (or
+`LendingIterator`) trait would need.
+
+[lending]: https://rust-lang.github.io/rfcs/2996-async-iterator.html#lending-async-iterators
+[gats]: https://blog.rust-lang.org/2022/11/03/Rust-1.65.0/
+
+However, I don't think `poll_progress` is compatible with lending. If the loop
+body borrows the iterator, but we also want to call `poll_progress` whenever
+the body is pending, that's an unavoidable borrowck conflict. Probably any
+approach to supporting "background work" would have the same problem. (Unless
+both `poll_progress` and lending work with shared references and interior
+mutability? Unlikely.)
+
+The need for `poll_progress` came from the following assumptions:
+
+1. We want async iterators (like `FuturesUnordered`) to be able to wrap
+   multiple concurrent futures and yield their results as they come.
+2. We can't tolerate suspending futures at random await points.
+
+I don't think a lending iterator can do much about the second assumption, but
+it might be able to attack the first, either by not wrapping multiple futures,
+or by waiting for all the futures it's running to finish before yielding
+control. That could be a useful abstraction in many cases, but giving up on
+`FuturesUnordered` and `Merge` seems like too much of a sacrifice for the
+standard trait that will power `for await` and `async gen fn`.
+
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
@@ -899,11 +931,11 @@ want to bikeshed this a bit.
 
 ### Should we rename `AsyncIterator` to `Stream`?
 
-RFC 2996 includes a [substantial discussion] of that question, and this RFC
-should avoid duplicating it. If the consensus on RFC 2996 changes, we can do a
+RFC 2996 includes [a discussion of that question][rename], and this RFC should
+avoid duplicating it. If the consensus on RFC 2996 changes, we can do a
 find/replace here.
 
-[substantial discussion]: https://github.com/rust-lang/rfcs/blob/master/text/2996-async-iterator.md#naming
+[rename]: https://rust-lang.github.io/rfcs/2996-async-iterator.html#naming
 
 ### Will anyone ever look at the `poll_progress` return value?
 
