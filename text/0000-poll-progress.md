@@ -193,9 +193,11 @@ to contend with, `AsyncIterator` has _five_:
 
 An `AsyncIterator` begins life in the first state above, expecting a prompt
 call to either `poll_next` or `poll_progress`. Although a `for await` loop will
-always start by calling `poll_next`, other consumers may start with
-`poll_progress`. Also, cancelling an async iterator by dropping it is allowed
-at any time.
+always start by calling `poll_next`, other consumers (e.g. [`Chain`], on its
+right side) may start with `poll_progress`. Also, cancelling an async iterator
+by dropping it is allowed at any time.
+
+[`Chain`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chain
 
 The first two requirements in the table above are bolded, because they're the
 most surprising. Expanding on those:
