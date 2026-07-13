@@ -694,7 +694,10 @@ fn print_numbers() -> impl AsyncIterator<Item = u32> {
 
 This is debatable, but let's take it for granted that we want the observable
 behavior of that function to be *identical* to the `async gen fn` above.
-Consider the following implementation of `Map`:
+Consider the following implementation of `Map` ([playground
+link][playground_map] using `for_each` instead of `for await`):
+
+[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=a86f7832b3b62f0e993c66f66488e8e0
 
 ```rs
 struct Map<Iter, F> {
@@ -738,8 +741,10 @@ resulting item. However, there's a footgun: `Map::poll_progress` shouldn't
 *always* try to fill that buffer slot, or else the *first loop* above will
 start printing "NUMBER 1" while its body is sleeping. If we want `Map` to
 behave exactly like the `async gen fn`, but we have to tolerate a "lazy"
-`Merge`, then `Map` also needs a `next_item_wanted` flag like this (and the
-compiler needs to generate similar code for each `async gen fn`):
+`Merge`, then `Map` also needs a `next_item_wanted` flag like this ([playground
+link][playground_map_lazy], using `for_each` instead of `for await`):
+
+[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=0efba8c2f159976f07757b9ccd61a405
 
 ```rs
 struct Map<Iter, F, T> {
