@@ -839,6 +839,40 @@ I think the same is true of `poll_next` in the new contract. The
 subtle enough that it's worth defining a distinct return type to represent
 them.
 
+### What's the purpose of the `Drop` requirement?
+
+The proposed `AsyncIterator` contract requires the caller to drop an iterator
+promptly after `poll_next` returns `Done`. That rule isn't isn't essential for
+the goals of the RFC, and if it's controversial, it could be removed without
+other substantial changes. In contrast, the rule about polling an
+`AsyncIterator` promptly after it's created is essential, because it avoids
+deadlocks in expressions like `some_iter.chain(future_unordered)`. I think it's
+likely that we'll want to introduce new lints or warnings to support that "poll
+promptly" requirement, for example something like "Don't hold an idle
+`AsyncIterator` (or a `Future` for that matter) across an suspension point."
+The proposed `Drop` rule is in the same spirit, following the intuition that
+async iterators (and futures) shouldn't "sit around" when we're not driving
+them.
+
+Most `poll_next` implementations forward `Done`, in which case they don't need
+any extra code or state to follow this rule. (Their responsibility to drop
+their children becomes their caller's responsibility to drop them.) The
+combinators that would need special handling for this are concurrent ones like
+`Merge` and `Buffer1`, read-ahead ones like `Peekable` and `Chunks`, and `Fuse`
+as a special case. In practice, most of those would satisfy the requirement by
+using `Fuse` internally.
+
+`ForEach` is an interesting case, because it's always done as soon as its inner
+iterator is done. (It doesn't read ahead, so it doesn't observe `Done` from the
+inner iterator until it after it executes the body closure for the last item.)
+If it could rely on its caller to drop it, it would also satisfy the `Drop`
+rule automatically. But `ForEach` is a `Future`, not an `AsyncIterator`, and
+`Future` doesn't document a similar `Drop` rule. If we like the idea of the
+`Drop` rule, we might want to document the same for `Future` at the same time.
+That would match the current behavior of e.g. [`futures::future::Fuse`].
+
+[`futures::future::Fuse`]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
+
 ## Prior art
 [prior-art]: #prior-art
 
