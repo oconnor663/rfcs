@@ -287,7 +287,8 @@ rule applies _to the caller_. The caller will poll again, and when they do,
 drop `inner` when it returns `Done`, because the caller will drop the whole
 `Buffer1`. However, `Buffer1::poll_progress` doesn't impose the same rule on
 its caller, so it must call `inner.poll_progress` in its `Item` branch and drop
-`inner` in its `Done` branch.
+`inner` in its `Done` branch. (In practice we might replace `Option<Iter>` with
+`Fuse<Iter>`, which could handle `Drop` internally and save us a few lines.)
 
 Note also that `Buffer1::poll_progress` doesn't call `inner.poll_progress`
 after `inner.poll_next` returns `Pending`. That's the "`PollNext::Pending`
