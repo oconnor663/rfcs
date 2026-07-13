@@ -6,13 +6,14 @@
 ## Summary
 [summary]: #summary
 
-Add a required `poll_progress` method to the [`AsyncIterator`] trait, and make
-`for await` loops call this method whenever an `.await` in their loop body is
-`Pending`. Expand the documented `AsyncIterator` contract to require
-combinators and consumers to do the same. To emphasize the contract
+Add a required `poll_progress` method to the [`AsyncIterator`] trait ([`RFC
+2996`]), and make `for await` loops call this method whenever an `.await` in
+their loop body is `Pending`. Expand the documented `AsyncIterator` contract to
+require combinators and consumers to do the same. To emphasize the contract
 requirements of `poll_next`, define a new `PollNext` enum for it to return,
 replacing `Poll<Option<_>>`.
 
+[`RFC 2996`]: https://rust-lang.github.io/rfcs/2996-async-iterator.html
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
 
 ## Motivation
