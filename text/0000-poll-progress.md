@@ -891,20 +891,26 @@ them.
 Most `poll_next` implementations forward `Done`, in which case they don't need
 any extra code or state to follow this rule. (Their responsibility to drop
 their children becomes their caller's responsibility to drop them.) The
-combinators that would need special handling for this are concurrent ones like
-`Merge` and `Buffer1`, read-ahead ones like `Peekable` and `Chunks`, and `Fuse`
+combinators that would need handling for this are concurrent ones like `Merge`
+and `Buffer1`, read-ahead ones like [`Peekable`] and [`Chunks`], and [`Fuse`]
 as a special case. In practice, most of those would satisfy the requirement by
 using `Fuse` internally.
 
-`ForEach` is an interesting case, because it's always done as soon as its inner
-iterator is done. (It doesn't read ahead, so it doesn't observe `Done` from the
-inner iterator until it after it executes the body closure for the last item.)
-If it could rely on its caller to drop it, it would also satisfy the `Drop`
-rule automatically. But `ForEach` is a `Future`, not an `AsyncIterator`, and
-`Future` doesn't document a similar `Drop` rule. If we like the idea of the
-`Drop` rule, we might want to document the same for `Future` at the same time.
-That would match the current behavior of e.g. [`futures::future::Fuse`].
+[`Peekable`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.peekable
+[`Chunks`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chunks
+[`Fuse`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse
 
+[`ForEach`] is an interesting case, because it's always done as soon as its
+inner iterator is done. (It doesn't read ahead, so it doesn't observe `Done`
+from the inner iterator until it after it executes the body closure for the
+last item.) If it could rely on its caller to drop it, it would also satisfy
+the `Drop` rule automatically. But `ForEach` is a `Future`, not an
+`AsyncIterator`, and `Future` doesn't document a similar `Drop` rule. If we
+like the idea of the `Drop` rule, we might want to document a similar one for
+`Future` at the same time. That would match the current behavior of e.g.
+[`futures::future::Fuse`].
+
+[`ForEach`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
 [`futures::future::Fuse`]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
 
 ## Prior art
