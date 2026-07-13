@@ -804,26 +804,26 @@ combinator that runs caller code that might have observable side effects -- so
 maybe not e.g. `Take` or `Skip`, but including e.g. `Then`, `Filter`,
 `TakeWhile`, and `SkipWhile` -- would also be _at least_ this complicated. It's
 not clear whether we'd actually want the `AsyncIterator` contract to require
-`async gen fn`-equivalent behavior, because those requirements would be both
-hard to explain and also hard to `assert!`. Realistically, we'd probably give
-up on the idea, and we'd accept that control flow through chains of async
-iterators is inconsistent and unpredictable, at least when callers care about
-exactly when side effects happen. (It's also possible to come up with deadlock
-examples based on these effects, but these deadlocks are less realistic and
+this sort of `async gen fn`-equivalent behavior, because those requirements
+would be both hard to explain and also hard to `assert!`. Realistically, we'd
+probably give up on the idea, and we'd accept that control flow through chains
+of async iterators is inconsistent and unpredictable, at least when callers
+care about exactly when side effects happen. (It's also possible to come up
+with deadlock examples based on these effects, but they're less realistic and
 more contrived than their `async fn` counterparts, so we've stuck with printing
 in this section.)
 
 The "`PollNext::Pending` rule" fixes this whole mess. It gives us a consistent,
 high-level picture of how control flow in any `AsyncIterator` works: Control
 "enters" the iterator when `poll_next` is initially called, and it "leaves" the
-iterator when `poll_next` returns `Item` or `Done`. While control is "in" the
-iterator, it's driven by continuous calls to `poll_next`, unless it's cancelled
-by dropping. When control is "out" of the iterator, it's instead driven by
-continuous calls to `poll_progress`. For non-concurrent iterators, all they
-need to do in `poll_progress` is forward it to their children. The cost of
-enforcing the rule falls mostly on concurrent combinators like `Merge` and
-`StreamMap`. Everything behaves consistently under concurrency in a way that we
-can document and teach.
+iterator when `poll_next` returns `Item` or `Done`. Once an iterator starts
+"running", it always continues uninterrupted (unless the whole thing is
+cancelled) to its next yield point (if any). This works the same way whether
+it's an `async gen fn` or a chain of combinators, and we can document it and
+teach it. For non-concurrent iterators, all `poll_progress` needs to do is
+forward itself to any children. The cost of enforcing the rule falls on
+concurrent combinators like `Merge` and `StreamMap`, which must track which of
+their children are "running" and keep running them until they give up control.
 
 ### Is it worth having a whole new `PollNext` enum?
 
