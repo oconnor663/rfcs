@@ -973,6 +973,20 @@ couple lines in a lot of `poll_progress` implementations if it just returned
 nothing. Would any callers care? Does anyone really need to know whether
 `poll_progress` registered a wakeup?
 
+### How should the `Stream` ecosystem migrate?
+
+A migration for `poll_progress` might not look too different from what we'd
+need to do anyway to move the trait into `core` and integrate `for await` with
+the existing ecosystem of streams. We could add a default, no-op
+`poll_progress` method to `Stream` and a blanket `impl<S: Stream> AsyncIterator
+for S`. The `Stream::poll_next` method would probably retain its current return
+type for compatibility. We'd encourage `Stream` implementations to override
+that default method ASAP, and until they do they'd have the same
+hang-and-deadlock-prone behavior they have today. We'd also encourage APIs with
+a `Stream` bound to switch to an `AsyncIterator`/`IntoAsyncIterator` bound
+(which should be a compatible change with that blanket impl), because iterators
+returned by `async gen fn` will not implement `futures::Stream`.
+
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
