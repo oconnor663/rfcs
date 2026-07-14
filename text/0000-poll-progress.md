@@ -989,8 +989,8 @@ need to do anyway to move the trait into `core` and integrate `for await` with
 the existing ecosystem of streams. We could add a default, no-op
 `poll_progress` method to `Stream` and a blanket `impl<S: Stream> AsyncIterator
 for S`. The `Stream::poll_next` method would probably retain its current return
-type for compatibility. We'd encourage `Stream` implementations to override
-that default method ASAP, and until they do they'd have the same
+type for compatibility. We'd encourage `Stream` implementations to override the
+default `poll_progress` method ASAP, and until they do they'd have the same
 hang-and-deadlock-prone behavior they have today. We'd also encourage APIs with
 a `Stream` bound to switch to an `AsyncIterator`/`IntoAsyncIterator` bound
 (which should be a compatible change with that blanket impl), because iterators
