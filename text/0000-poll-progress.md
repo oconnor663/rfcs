@@ -411,19 +411,25 @@ innermost.
 An `async gen fn` returns an `AsyncIterator` implementation. If control in the
 `async gen fn` is at a `yield` (not an `.await`) in the body of a `for await`
 loop, then the `poll_progress` method on the returned `AsyncIterator` calls
-`poll_progress` on that loop's iterator. Note that if `for await` loops are
-nested, there may be multiple such iterators, and `poll_progress` gets
-forwarded to all of them, starting with the innermost. If any of the forwarded
-`poll_progress` calls is pending, then `poll_progress` on the returned
-`AsyncIterator` also returns `Pending`, otherwise it returns `Ready`.
+`poll_progress` on that loop's iterator. If `for await` loops are nested, there
+may be multiple such iterators, and `poll_progress` gets forwarded to all of
+them, starting with the innermost. If any of the forwarded `poll_progress`
+calls is pending, then `poll_progress` on the returned `AsyncIterator` also
+returns `Pending`, otherwise it returns `Ready`.
 
-Note that when control is suspended at a pending `.await` in an `async gen fn`,
-`poll_progress` will not be called on the returned `AsyncIterator`, because the
-last call to its `poll_next` method did not return `Item`. (Concretely, if its
-caller is using `for await`, the caller is currently in step 3 above, not step
-7.) In that case, it's the returned `AsyncIterator`'s `poll_next` method that's
-responsible for driving progress in any other async iterators it's looping
-over, following the rules in the previous section.
+Note that the when control reaches a `yield`, that by itself does _not_
+necessarily imply a call to `poll_progress` on any active iterators. If the
+caller's loop doesn't encounter a pending `.await`, then nothing will call
+`poll_progress`, and control will resume from the `yield` promptly instead
+(unless cancelled).
+
+Note also that when control is suspended at a pending `.await` in an `async gen
+fn`, `poll_progress` will not be called on the returned `AsyncIterator`,
+because the last call to its `poll_next` method did not return `Item`.
+(Concretely, if its caller is using `for await`, the caller is currently in
+step 3 above, not step 7.) In that case, it's the returned `AsyncIterator`'s
+`poll_next` method that's responsible for driving progress in any other async
+iterators it's looping over, following the rules in the previous section.
 
 For example:
 
@@ -432,12 +438,15 @@ async gen fn foo() {
     for await _ in bar() {
         for await _ in baz() {
             // While this expression is pending, `foo`'s `poll_next` function calls `poll_progress` on the
-            // `bar` and `baz` async iterators before reporting pending itself. The `AsyncIterator` contract
+            // `baz` and `bar` async iterators before reporting pending itself. The `AsyncIterator` contract
             // guarantees that `foo`'s `poll_progress` function will not be called in this state.
             do_work().await;
+
             // While control is suspended at this `yield`, `foo`'s `poll_progress` function calls
-            // `poll_progress` on the `bar` and `baz` async iterators, and it reports pending if either of
-            // those calls is pending.
+            // `poll_progress` on the `baz` and `bar` async iterators, and it reports pending if either of
+            // those calls is pending. Note that reaching this `yield` does *not* automatically call
+            // `poll_progress` on `baz` or `bar`. That call only comes if/when the caller encounters a pending
+            // await in their own loop and calls `poll_progress` on `foo`.
             yield;
         }
     }
