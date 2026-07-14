@@ -207,10 +207,10 @@ the most surprising. Expanding on those:
   required to register any wakeups. That's important for performance, because
   there might be many items ready to return, and we don't want to trigger
   redundant wakeups for each of them or cause an extra round trip through the
-  executor. On the flip side, if/when we don't want to call `poll_next`
-  anymore, we need to call `poll_progress` before returning pending ourselves,
-  to give the iterator a chance to finish its own polling responsibilities and
-  register wakeups.
+  executor. (This much is also true of `Stream` today.) On the flip side,
+  if/when we don't want to call `poll_next` anymore, we need to call
+  `poll_progress` before returning pending ourselves, to give the iterator a
+  chance to finish its own polling responsibilities and register wakeups.
 - **The `PollNext::Pending` rule:** When `poll_next` is pending, we have to
   `poll_next` again at the next wakeup; we can't "change our minds" about
   wanting an item and switch to `poll_progress`. (The only valid way to change
