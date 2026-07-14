@@ -186,8 +186,8 @@ to contend with, `AsyncIterator` has _five_:
 
 | Previous return | You are required to... |
 | --- | --- |
-| `poll_next` returned `PollNext::Item` | Poll again **promptly**, either `poll_next` if you want another item or `poll_progress` if not. |
-| `poll_next` returned `PollNext::Pending` | `poll_next` again after wakeup. `poll_progress` is **not allowed**. |
+| `poll_next` returned `PollNext::Item` | <ins><strong>Poll again promptly,</strong></ins> either `poll_next` if you want another item or `poll_progress` if not. |
+| `poll_next` returned `PollNext::Pending` | `poll_next` again after wakeup. <ins><strong>`poll_progress` is not allowed.</strong></ins> |
 | `poll_next` returned `PollNext::Done` | Never poll again. Drop promptly. |
 | `poll_progress` returned `Poll::Pending` | `poll_next` whenever you want another item, otherwise `poll_progress` again after wakeup. |
 | `poll_progress` returned `Poll::Ready` | `poll_next` whenever you want another item, otherwise stop polling. `poll_progress` is allowed but has no further effect. |
@@ -200,8 +200,8 @@ by dropping it is allowed at any time.
 
 [`Chain`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chain
 
-The first two requirements in the table above are bolded, because they're the
-most surprising. Expanding on those:
+The first two requirements in the table above are underlined, because they're
+the most surprising. Expanding on those:
 
 - **The `PollNext::Item` rule:** When `poll_next` returns an item, it's not
   required to register any wakeups. That's important for performance, because
