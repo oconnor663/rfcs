@@ -926,6 +926,7 @@ it, have been discussed for many years. Some points of reference:
 - ["`for await` and the battle of buffered streams"](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
 - https://without.boats/blog/poll-progress
 - ["A discussion prototype for `AsyncIterator`"](https://hackmd.io/EplPcmBCTCSQ9LPOU6IZDw) and related [meeting notes](https://hackmd.io/bYaPiCdqR3WIyjKhFWzdtQ)
+- [`futures_concurrency::concurrent_stream::Consumer::progress`](https://docs.rs/futures-concurrency/latest/futures_concurrency/concurrent_stream/trait.Consumer.html#tymethod.progress)
 - ["Future's liveness problem"](https://skepfyr.me/blog/futures-liveness-problem/)
 - ["Futurelock"][futurelock]
 - ["Never snooze a future"](https://jacko.io/snooze.html)
