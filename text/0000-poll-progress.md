@@ -966,12 +966,10 @@ implementation bug?)
 
 In theory we could make it a logic error to call `poll_progress` again after it
 returns `Ready` -- like it is to call `Future::poll` again after it returns
-`Ready`, or `Iterator::next` after it returns `None` -- but in practice it's
-hard to imagine an implementation that would benefit from that requirement,
-while it would be a bookkeeping burden on many callers. (`Iterator` combinators
-that would need extra state to fuse themselves are also quite rare, but there
-are a couple standard ones, including `map_while` and `scan`.) It seems simpler
-overall to make `poll_progress` idempotent after it returns `Ready`.
+`Ready` -- but in practice it's hard to imagine an implementation that would
+benefit from that requirement, while it would be a bookkeeping burden on many
+callers. It seems simpler overall to make `poll_progress` idempotent after it
+returns `Ready`.
 
 But that raises the question: If callers don't need to track the previous
 return value, then they probably won't look at it at all. It could save a
