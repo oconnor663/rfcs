@@ -369,7 +369,7 @@ finished, we loop around and print `got B` immediately.
 
 ### `for await`
 
-We can't de-sugar this RFC's version of `for await` syntax into a loop (the way
+We can't desugar this RFC's version of `for await` syntax into a loop (the way
 the Reference does for [the `for` keyword][for]), because we'd need to treat
 the body as a future (e.g. `await { /* body */ }`) to intercept `Pending` and
 call `poll_progress` in the right place, but that's incompatible with `return`,
@@ -417,11 +417,10 @@ them, starting with the innermost. If any of the forwarded `poll_progress`
 calls is pending, then `poll_progress` on the returned `AsyncIterator` also
 returns `Pending`, otherwise it returns `Ready`.
 
-Note that the when control reaches a `yield`, that by itself does _not_
-necessarily imply a call to `poll_progress` on any active iterators. If the
-caller's loop doesn't encounter a pending `.await`, then nothing will call
-`poll_progress`, and control will resume from the `yield` promptly instead
-(unless cancelled).
+Note that when control reaches a `yield`, that by itself does _not_ necessarily
+imply a call to `poll_progress` on any active iterators. If the caller's loop
+doesn't encounter a pending `.await`, then nothing will call `poll_progress`,
+and control will resume from the `yield` promptly instead (unless cancelled).
 
 Note also that when control is suspended at a pending `.await` in an `async gen
 fn`, `poll_progress` will not be called on the returned `AsyncIterator`,
@@ -459,12 +458,12 @@ async gen fn foo() {
 ### What about `.next()`?
 
 The main way users interact with `Stream` in the async ecosystem today is the
-[`StreamExt::next`] async function/method, which returns a future representing
-the next item in the stream. But the API contract proposed in this RFC isn't
-generally compatible with `next`, because the `Next` future is short-lived, and
-it can't drive the stream after it yields its item. (Contrast this with
-consumers like [`for_each`] and [`fold`], which take ownership of their input
-and can implement the new contract internally.)
+[`StreamExt::next`] method, which returns a future representing the next item
+in the stream. But the API contract proposed in this RFC isn't generally
+compatible with `next`, because the `Next` future is short-lived, and it can't
+drive the stream after it yields its item. (Contrast this with consumers like
+[`for_each`] and [`fold`], which take ownership of their input and can
+implement the new contract internally.)
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
@@ -637,7 +636,7 @@ called _at least once_ before allowing control to enter the body, and before
 allowing control to proceed after a `yield`. That's doable, but then would we
 want equivalent behavior from combinators like [`Map`] and [`Then`]? Those
 would need to add a state flag that they don't have today -- call it
-`next_item_wanted` -- and they'd also need a rarely-used buffer slot for an
+`next_item_wanted` -- and they'd also need a rarely used buffer slot for an
 item. (See the following section for detailed examples of all of this.)
 
 [`Map`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.map
@@ -723,7 +722,7 @@ contract,_ because our design assumption is that we _never_ pause the flow of
 control at an await point in an async function (or in this case, at a `for
 await` point in an `async gen fn`). The sleep in `slow_numbers` is there to
 make sure that `Merge` calls `poll_next` on both sides; we don't need to ask
-subtle questions about what `Merge` does when one side was immediately ready.
+subtle questions about what `Merge` does when one side is immediately ready.
 
 With all that in mind, let's think about what would happen if we instead
 implemented `print_numbers` like this, using the `Map` combinator:
@@ -887,17 +886,16 @@ them.
 ### What's the purpose of the `Drop` requirement?
 
 The proposed `AsyncIterator` contract requires the caller to drop an iterator
-promptly after `poll_next` returns `Done`. That rule isn't isn't essential for
-the goals of the RFC, and if it's controversial, it could be removed without
-other substantial changes. In contrast, the rule about polling an
-`AsyncIterator` promptly after it's created is essential, because it avoids
-deadlocks in expressions like `some_iter.chain(future_unordered)`. I think it's
-likely that we'll want to introduce new lints or warnings to support that "poll
-promptly" requirement, for example something like "Don't hold an idle
-`AsyncIterator` (or a `Future` for that matter) across an suspension point."
-The proposed `Drop` rule is in the same spirit, following the intuition that
-async iterators (and futures) shouldn't "sit around" when we're not driving
-them.
+promptly after `poll_next` returns `Done`. That rule isn't essential for the
+goals of the RFC, and if it's controversial, it could be removed without other
+substantial changes. In contrast, the rule about polling an `AsyncIterator`
+promptly after it's created is essential, because it avoids deadlocks in
+expressions like `some_iter.chain(future_unordered)`. I think it's likely that
+we'll want to introduce new lints or warnings to support that "poll promptly"
+requirement, for example something like "Don't hold an idle `AsyncIterator` (or
+`Future` for that matter) across a suspension point." The proposed `Drop` rule
+is in the same spirit, following the intuition that async iterators (and
+futures) shouldn't "sit around" when we're not driving them.
 
 Most `poll_next` implementations forward `Done`, in which case they don't need
 any extra code or state to follow this rule. (Their responsibility to drop
@@ -913,13 +911,12 @@ using `Fuse` internally.
 
 [`ForEach`] is an interesting case, because it's always done as soon as its
 inner iterator is done. (It doesn't read ahead, so it doesn't observe `Done`
-from the inner iterator until it after it executes the body closure for the
-last item.) If it could rely on its caller to drop it, it would also satisfy
-the `Drop` rule automatically. But `ForEach` is a `Future`, not an
-`AsyncIterator`, and `Future` doesn't document a similar `Drop` rule. If we
-like the idea of the `Drop` rule, we might want to document a similar one for
-`Future` at the same time. That would match the current behavior of e.g.
-[`futures::future::Fuse`].
+from the inner iterator until after it executes the body closure for the last
+item.) If it could rely on its caller to drop it, it would also satisfy the
+`Drop` rule automatically. But `ForEach` is a `Future`, not an `AsyncIterator`,
+and `Future` doesn't document a similar `Drop` rule. If we like the idea of the
+`Drop` rule, we might want to document a similar one for `Future` at the same
+time. That would match the current behavior of e.g. [`futures::future::Fuse`].
 
 [`ForEach`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
 [`futures::future::Fuse`]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
