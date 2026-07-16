@@ -994,7 +994,7 @@ returned by `async gen fn` will not implement `futures::Stream`.
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
-### Concurrency syntax for the body of an `async gen fn`
+### Concurrency syntax
 
 Today we can only introduce concurrency into async iteration by using
 combinators like `Merge` or `Buffer1`, which are written "by hand" using the
@@ -1035,9 +1035,7 @@ async gen fn foo() {
 
 What if there was some hypothetical built-in syntax for writing the `async fn`
 above? Maybe it could support error handling and other short-circuiting
-operations (`break`, `continue`) more gracefully. (Tangent: Maybe it could even
-allow conflicting mutable borrows on both sides, as long as they don't cross an
-`.await`!?)
+operations (`break`, `continue`) more gracefully.
 
 ```rs
 async fn bar() -> anyhow::Result<()> {
@@ -1049,6 +1047,20 @@ async fn bar() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+> Tangent #1: It could be sound to allow conflicting mutable borrows on both
+> sides here, as long as they don't cross a suspension point. That would be a
+> second example of control flow that only async code can express, along with
+> cancellation.
+
+> Tangent #2: The syntax bikeshedding for a feature like this would be intense,
+> of course, but an interesting feature of `await all`...`and` is that it
+> suggests a counterpart, `await any`...`or`. The former would have branches of
+> different types, and it would evaluate to a tuple, while the latter would
+> have branches of the same type, and it would evaluate to a single value. This
+> would be the "built-in version of `select!`". It could also allow conflicting
+> _moves_ after the final suspension point in each branch, since only one
+> branch ever makes it that far.
 
 What if that hypothetical syntax also supported _yielding_? What might _this_
 do?
