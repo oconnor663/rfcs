@@ -487,12 +487,12 @@ _ = tokio::time::timeout(Duration::from_millis(1), my_iter.next()).await;
 do_work().await; // Deadlock!
 ```
 
-In both cases, there's `AsyncIterator` that's ready to make progress -- in the
-first case `LOCK` has invoked a `Waker`, and in the second case `sleep` has --
-and we're supposed to poll it or drop it promptly. But after `next` returns,
+In both cases, there's an `AsyncIterator` that's ready to make progress -- in
+the first case `LOCK` has invoked a `Waker`, and in the second case `sleep` has
+-- and we're supposed to poll it or drop it promptly. But after `next` returns,
 nothing is responsible for doing that. To satisfy the proposed contract,
-whatever's driving an `AsyncIterator` generally needs to _own_ it. That's no
-problem for `for await` loops, or for terminal consumers like [`for_each`] and
+whatever's driving an `AsyncIterator` generally needs to _own_ it. That the
+case with `for await` loops, and for terminal consumers like [`for_each`] and
 [`fold`], but it's a problem for `next`.
 
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
@@ -505,7 +505,7 @@ let mut stream = pin!(...);
 while let Some(item) = stream.next().await { ... }
 ```
 
-That can be replaced with a `for await` loop:
+Those common cases can be replaced with a `for await` loop:
 
 ```rs
 for await item in stream { ... }
@@ -548,6 +548,31 @@ migration, the macro also fixes [potential deadlocks in the loop
 above][loop_select_deadlock].
 
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
+
+### What about the blanket impls for `&mut I` and `Pin<&mut I>`?
+
+`Iterator` has a blanket impl for [`&mut I`][iter_blanket], and today
+`AsyncIterator` (like `Stream`) has similar blanket impls for [`&mut
+I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. The
+async ones are deadlock-prone, though, and we should remove them. We can abuse
+them trigger a deadlock similar to the first `next` example above:
+
+[iter_blanket]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#impl-Iterator-for-%26mut+I
+[async_iter_blanket_mut]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-%26mut+S
+[async_iter_blanket_pin]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-Pin%3CP%3E
+
+```rs
+let mut my_iter = pin!(once(do_work()).merge(once(do_work())));
+for await _ in my_iter {
+    break;
+}
+do_work().await; // Deadlock!
+```
+
+Normally we expect `for await` to drop its iterator when it short-circuits,
+which avoids the deadlocks we saw with `next`. But the call to `pin!` here
+means we're actually looping over a `Pin<&mut _>` reference, and dropping that
+has no effect. The real iterator doesn't drop until end-of-scope.
 
 ### What about "lending" async iterators?
 
