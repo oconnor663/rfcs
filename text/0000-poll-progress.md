@@ -920,11 +920,12 @@ goals of the RFC, and if it's controversial, it could be removed without other
 substantial changes. In contrast, the rule about polling an `AsyncIterator`
 promptly after it's created is essential, because it avoids deadlocks in
 expressions like `some_iter.chain(future_unordered)`. I think it's likely that
-we'll want to introduce new lints or warnings to support that "poll promptly"
-requirement, for example something like "Don't hold an idle `AsyncIterator` (or
-`Future` for that matter) across a suspension point." The proposed `Drop` rule
-is in the same spirit, following the intuition that async iterators (and
-futures) shouldn't "sit around" when we're not driving them.
+we'll want to introduce new lints or warnings to reinforce that "poll promptly"
+requirement, for example something like "Don't hold an idle `AsyncIterator`
+across a suspension point." The proposed `Drop` rule is in the same spirit,
+following the intuition that async iterators shouldn't "sit around" when we're
+not driving them. (Could we say the same of `Future`? See "Future
+possibilities" below, no pun intended.)
 
 Most `poll_next` implementations forward `Done`, in which case they don't need
 any extra code or state to follow this rule. (Their responsibility to drop
@@ -1023,6 +1024,46 @@ returned by `async gen fn` will not implement `futures::Stream`.
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
+### Clarifying the `Future` contract
+
+The second deadlock in the "What about `.next()`?" section isn't really
+specific to `AsyncIterator`. We can reproduce it using only `Future`
+([playground link][future_deadlock]):
+
+[future_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_future+%3D+pin%21%28do_work%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+my_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rs
+let my_future = pin!(do_work());
+_ = tokio::time::timeout(Duration::from_millis(1), my_future).await;
+do_work().await; // Deadlock!
+```
+
+Who's "at fault" there? This example doesn't generate any warnings or fail any
+lints today. Maybe it should. Above we wrote:
+
+> To satisfy the proposed contract, whatever's driving an `AsyncIterator`
+> generally needs to _own_ it.
+
+The relevant part of the contract there is "poll again when you get a wakeup".
+That's just as important for `Future` as it is of `AsyncIterator`. Should we
+deprecate helpers that can't live up to that responsibility? Does that include
+the blanket `Future` impls on [`&mut F`][future_blanket_mut] and [`Pin<&mut
+F>`][future_blanket_pin]? They can't be removed at this point, but we could
+warn on code that uses them. We could also warn or lint whenever an idle
+`Future` lives across a suspension point. That wouldn't cover e.g. `Vec<impl
+Future>`, but most `Future` containers are themselves futures or async
+iterators, and the corner cases might not matter much in practice.
+
+[future_blanket_mut]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
+[future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
+
+A warning like that could've caught ["Futurelock"][futurelock] before it
+happened. On the other hand, there are many `select!` loops in the wild that
+would trigger the same warnings, where there's no widely-used _owning_ pattern
+that can easily replace them today. Improving this situation might need go
+hand-in-hand with [new macros](https://github.com/oconnor663/join_me_maybe) or
+possibly new syntax. Speaking of which...
+
 ### Concurrency syntax
 
 Today we can only introduce concurrency into async iteration by using
@@ -1084,7 +1125,7 @@ async fn bar() -> anyhow::Result<()> {
 
 > Tangent #2: The syntax bikeshedding for a feature like this would be intense,
 > of course, but an interesting feature of `await all`...`and` is that it
-> suggests a counterpart, `await any`...`or`. The former would have branches of
+> suggests a counterpart, `await any`...`or`. The former could have branches of
 > different types, and it would evaluate to a tuple, while the latter would
 > have branches of the same type, and it would evaluate to a single value. This
 > would be the "built-in version of `select!`". It could also allow conflicting
