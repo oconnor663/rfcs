@@ -1096,12 +1096,10 @@ where
 
 ### Generalized coroutines
 
-We can imagine a more general "coroutine" version of `Iterator` and
+We could imagine a more general "coroutine" version of `Iterator` and
 `AsyncIterator`, which (as in e.g. Python) takes inputs in addition to yielding
-items, and which also has a final return value. Not that we should necessarily
-_implement_ such a feature, but it might be useful to keep the idea in mind.
-
-There are a couple of unused value spots in the `for` and `for await` syntax:
+items, and which also has a final return value. There are a couple of unused
+value spots in the `for` and `for await` syntax:
 
 ```rs
 for await item in iter {
@@ -1120,14 +1118,14 @@ async gen fn foo() -> u32 {
 }
 ```
 
-These spots map surprisingly cleanly to the concept of a "coroutine" in
-languages like Python. In the `gen fn` / `async gen fn` syntax, input items
-become the value of the currently suspended `yield` expression, and the final
-value comes from the return value of the body. In the `for` / `for await`
-syntax, the final value could become the value of the loop itself, and the
-input items could come from the value of the body. (This would suggest that
-`break` would need a value of the same type as the final value, and `continue`
-would need a value of the same type as the inputs.)
+These spots are a surprisingly good fit for coroutine inputs and return values.
+In the `gen fn` / `async gen fn` syntax, an input item would become the value
+of the currently suspended `yield` expression, and the return value of the body
+would be final value of the coroutine. In the `for` / `for await` syntax, the
+final value could become the value of the loop itself, and the input items
+could come from the value of the body. (This would suggest that `break` would
+need a value of the same type as the final value, and `continue` would need a
+value of the same type as the inputs.)
 
 The async coroutine equivalent of `PollNext` might have a second type parameter
 for the final value:
@@ -1141,14 +1139,16 @@ enum CoroutinePollNext<Item, Return> {
 ```
 
 An async coroutine trait might look very similar to the version of
-`AsyncIterator` proposed here. It would need a third method called something
-like `send`, and perhaps the contract would be that you must call `send` once
-at some point after each `Item`, before calling `poll_next` again. A `for await
-coroutine` loop or whatever it might be called wouldn't have an obvious way to
-enable concurrency between the coroutine and the body (a wrapper type like
-`Buffer1` above would need a way to come up with input values, which might be
-possible in some cases), but [more complicated macros][drive] might be able to
-do fun things.
+`AsyncIterator` proposed here. It would need three type parameters and a third
+method called something like `send`. Perhaps the contract would be that you
+must call `send` once at some point after each `Item`, before calling
+`poll_next` again. We might also define a "`send` rule" similar to the
+"`PollNext::Pending` rule": once you `send` an input, the iterator is
+"running", and you must call `poll_next` promptly. It wouldn't be as easy for a
+`for await coroutine` loop or whatever it might be called to enable concurrency
+between the coroutine and the body -- a wrapper type like `Buffer1` above would
+need a way to come up with input values, which might be possible in some cases
+-- but [more complicated macros][drive] would be able to do fun things.
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
