@@ -459,13 +459,42 @@ async gen fn foo() {
 
 The main way users interact with `Stream` in the async ecosystem today is the
 [`StreamExt::next`] method, which returns a future representing the next item
-in the stream. But the API contract proposed in this RFC isn't generally
+in the stream. But the `AsyncIterator` contract proposed in this RFC isn't
 compatible with `next`, because the `Next` future is short-lived, and it can't
-drive the stream after it yields its item. (Contrast this with consumers like
-[`for_each`] and [`fold`], which take ownership of their input and can
-implement the new contract internally.)
+keep polling its iterator after it yields an item. (Technically it could call
+`poll_progress` before returning, but it can't respond to wakeups.) Consider
+this modified version of the [original `merge` deadlock above](#motivation)
+([playground link][next1]):
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
+[next1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++_+%3D+my_iter.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rs
+let mut my_iter = pin!(once(do_work()).merge(once(do_work())));
+_ = my_iter.next().await;
+do_work().await; // Deadlock!
+```
+
+This RFC is focused on concurrency, but the problem with `next` is actually
+broader. Here's a similar example without the `merge`, where the deadlock stems
+from cancellation ([playground link][next2]):
+
+[next2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+my_iter.next%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rs
+let mut my_iter = pin!(once(do_work()));
+_ = tokio::time::timeout(Duration::from_millis(1), my_iter.next()).await;
+do_work().await; // Deadlock!
+```
+
+In both cases, there's `AsyncIterator` that's ready to make progress -- in the
+first case `LOCK` has invoked a `Waker`, and in the second case `sleep` has --
+and we're supposed to poll it or drop it promptly. But after `next` returns,
+nothing is responsible for doing that. To satisfy the proposed contract,
+whatever's driving an `AsyncIterator` generally needs to _own_ it. That's no
+problem for `for await` loops, or for terminal consumers like [`for_each`] and
+[`fold`], but it's a problem for `next`.
+
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
 [`fold`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.fold
 
