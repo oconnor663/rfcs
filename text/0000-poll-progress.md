@@ -98,8 +98,8 @@ To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
 futures they contain. That means that `for await` and other consumers and
 combinators need a way to let an iterator make progress, even when they're not
-ready to accept another item. The new `poll_progress` method is how they can do
-this. It comes with new contract requirements, and to emphasize those we'll
+ready to accept another item. The new `poll_progress` method is how they will
+do this. It comes with new contract requirements, and to emphasize those we'll
 change the return type of `poll_next` from `Poll<Option<_>>` to a dedicated
 `PollNext` enum.
 
@@ -169,14 +169,13 @@ And like `Future::poll`, it can also return `Pending`, meaning that no item is
 currently ready, and a wakeup has been registered. When a `for await` loop
 wants to get the next item from an async iterator, it calls `poll_next`.
 
-`poll_progress` is unique to `AsyncIterator`, and it's what allows the iterator
-to do background work when the caller isn't ready for another item. It returns
-`Poll::Pending` (not `PollNext::Pending`) when more progress might be possible
-in the future, and it also registers a wakeup in that case. When no more
-internal progress is possible without calling `poll_next` again,
-`poll_progress` returns `Ready`. When an `.await` in the body of a `for await`
-loop is pending, the loop calls `poll_progress` on its iterator before
-reporting pending itself.
+`poll_progress` is what allows an iterator to do background work when the
+caller isn't ready for another item. It returns `Poll::Pending` (not
+`PollNext::Pending`) when more progress might be possible in the future, and it
+also registers a wakeup in that case. When no more internal progress is
+possible without calling `poll_next` again, `poll_progress` returns `Ready`.
+When an `.await` in the body of a `for await` loop is pending, the loop calls
+`poll_progress` on its iterator before reporting pending itself.
 
 [`Poll::Pending`]: https://doc.rust-lang.org/std/task/enum.Poll.html
 
@@ -224,9 +223,9 @@ the most surprising. Expanding on those:
   further](#why-not-allow-poll_progress-at-any-time).
 
 Let's look at the implementation of an async iterator combinator, `Buffer1`,
-which wraps another `AsyncIterator` and pre-fetches the next item in
+which wraps another `AsyncIterator` and pre-fetches its next item in
 `poll_progress`. This surprisingly powerful combinator turns _any_
-`AsyncIterator` into a concurrent iterator that does work in the background:
+`AsyncIterator` into a concurrent one that does work in the background:
 
 ```rs
 struct Buffer1<Iter: AsyncIterator> {
@@ -461,15 +460,12 @@ The main way users interact with `Stream` in the async ecosystem today is the
 [`StreamExt::next`] method, which returns a future representing the next item
 in the stream. But the `AsyncIterator` contract proposed in this RFC isn't
 compatible with `next`, because the `Next` future is short-lived, and it can't
-keep polling its iterator after it yields an item.
+keep polling its iterator after it yields an item. `AsyncIterator` won't have a
+`next` method, and we'll need a migration plan for existing callers.
 
-> Technically `Next` could call `poll_progress` once before returning, but it
-> can't respond to wakeups after that. Even more technically, it could wait
-> until `poll_progress` returned `Ready` before returning `Ready` itself. But
-> that's not how anybody wants `next` to work.
-
-Consider this modified version of the [original `merge` deadlock
-above][motivation] ([playground link][next1]):
+First, the problem. Here's a version of the [original `merge` example
+above][motivation] that deadlocks even with `poll_progress` ([playground
+link][next1]):
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [next1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++_+%3D+my_iter.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
@@ -480,10 +476,10 @@ _ = my_iter.next().await;
 do_work().await; // Deadlock!
 ```
 
-This isn't something `poll_progress` can fix, because who's going to call it?
-This RFC is focused on concurrency, but the problem with `next` is actually
-broader. Here's a similar example without the `merge`, where the deadlock stems
-from cancellation ([playground link][next2]):
+In theory something's supposed to call `my_iter.poll_progress` when `do_work`
+is pending, but there's no `for await` here to do that automatically, and the
+`Next` future is gone. Here's another example, this time without the `merge`,
+where the deadlock stems from cancellation ([playground link][next2]):
 
 [next2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+my_iter.next%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
@@ -496,15 +492,16 @@ do_work().await; // Deadlock!
 In both cases, there's an `AsyncIterator` that's ready to make progress -- in
 the first case `LOCK` has already invoked a `Waker`, and in the second case
 `sleep` eventually does -- and we're supposed to poll it or drop it promptly.
-But after `next` returns, nothing is responsible for doing that. To satisfy the
-proposed contract, whatever's driving an `AsyncIterator` generally needs to
-_own_ it. That the case with `for await` loops, and with terminal consumers
-like [`for_each`] and [`fold`], but it's a problem for `next`.
+What we're seeing is that, to satisfy the proposed contract, whatever's driving
+an `AsyncIterator` generally needs to _own_ it. That the case with `for await`
+loops, and with terminal consumers like [`for_each`] and [`fold`], but it's a
+problem for `next`.
 
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
 [`fold`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.fold
 
-The most common use case for `next` today is a loop like this:
+Now, the alternatives. The most common use case for `next` today is a loop like
+this:
 
 ```rs
 let mut stream = pin!(...);
@@ -551,7 +548,9 @@ In these difficult cases, it's possible to recreate the `next` method in a
 proof-of-concept][drive], which takes ownership of an async iterator and
 provides a handle with `next` and `with_mut` methods on it. Apart from easing
 migration, the macro also fixes [potential deadlocks in the loop
-above][loop_select_deadlock].
+above][loop_select_deadlock]. The macro is `no_std`-compatible, but it's also
+quite complicated. We could consider adding something like it to `core`
+someday, but this RFC doesn't propose doing that at first.
 
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21+%28after+a+few+iterations%29%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
@@ -559,9 +558,9 @@ above][loop_select_deadlock].
 
 `Iterator` has a blanket impl for [`&mut I`][iter_blanket], and today
 `AsyncIterator` (like `Stream`) has similar blanket impls for [`&mut
-I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. The
-async ones are deadlock-prone, though, and we should remove them. We can abuse
-them trigger a deadlock similar to the first `next` example above:
+I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. But
+the async ones are deadlock-prone, for the same reason `next` was above, and we
+should remove them. Here's another similar deadlock:
 
 [iter_blanket]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#impl-Iterator-for-%26mut+I
 [async_iter_blanket_mut]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-%26mut+S
@@ -578,7 +577,8 @@ do_work().await; // Deadlock!
 Normally we expect `for await` to drop its iterator when it short-circuits,
 which avoids the deadlocks we saw with `next`. But the call to `pin!` here
 means we're actually looping over a `Pin<&mut _>` reference, and dropping that
-has no effect. The real iterator doesn't drop until end-of-scope.
+has no effect. This is another example of how driving an `AsyncIterator`
+correctly requires _ownership_.
 
 ### What about "lending" async iterators?
 
@@ -592,11 +592,11 @@ has made it possible to express the lifetimes that a `LendingAsyncIterator` (or
 [lending]: https://rust-lang.github.io/rfcs/2996-async-iterator.html#lending-async-iterators
 [gats]: https://blog.rust-lang.org/2022/11/03/Rust-1.65.0/
 
-However, I don't think `poll_progress` is compatible with lending. If the loop
-body borrows the iterator, but we also want to call `poll_progress` whenever
-the body is pending, that's an unavoidable borrowck conflict. Probably any
-approach to supporting "background work" would have the same problem. (Unless
-both `poll_progress` and lending work with shared references and interior
+However, `poll_progress` isn't compatible with lending. If the loop body
+borrows the iterator, but we also want to call `poll_progress` whenever the
+body is pending, that's an unavoidable borrowck conflict. Probably any approach
+to supporting "background work" would have the same problem. (Unless both
+`poll_progress` and lending work with shared references and interior
 mutability? Unlikely.)
 
 The need for `poll_progress` came from the following assumptions:
@@ -605,10 +605,10 @@ The need for `poll_progress` came from the following assumptions:
    multiple concurrent futures and yield their results as they come.
 2. We can't tolerate suspending futures at random await points.
 
-I don't think a lending iterator can do much about the second assumption, but
-it might be able to attack the first, either by not wrapping multiple futures,
-or by waiting for all the futures it's running to finish before yielding
-control. That could be a useful abstraction in many cases, but giving up on
+A lending iterator can't do much about the second assumption, but it might be
+able to attack the first, either by not wrapping multiple futures, or by
+waiting for all the futures it's running to finish before yielding control.
+That could be a useful abstraction in many cases, but giving up on
 `FuturesUnordered` and `Merge` seems like too much of a sacrifice for the
 standard trait that will power `for await` and `async gen fn`.
 
