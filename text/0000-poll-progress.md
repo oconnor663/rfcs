@@ -557,9 +557,9 @@ someday, but this RFC doesn't propose doing that at first.
 ### What about the blanket impls for `&mut I` and `Pin<&mut I>`?
 
 `Iterator` has a blanket impl for [`&mut I`][iter_blanket], and today
-`AsyncIterator` (like `Stream`) has similar blanket impls for [`&mut
+`AsyncIterator` (like `Stream`) has similar impls for [`&mut
 I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. But
-the async ones are deadlock-prone, for the same reason `next` was above, and we
+the async ones are deadlock-prone, for the same reason as `next` above, and we
 should remove them. Here's another similar deadlock:
 
 [iter_blanket]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#impl-Iterator-for-%26mut+I
@@ -574,11 +574,13 @@ for await _ in my_iter {
 do_work().await; // Deadlock!
 ```
 
-Normally we expect `for await` to drop its iterator when it short-circuits,
-which avoids the deadlocks we saw with `next`. But the call to `pin!` here
-means we're actually looping over a `Pin<&mut _>` reference, and dropping that
-has no effect. This is another example of how driving an `AsyncIterator`
-correctly requires _ownership_.
+Again `poll_progress` is no help, because this deadlock happens after our `for
+await` loop is finished. Normally `for await` would drop the iterator when it
+short-circuits, but the `pin!` here means we're actually looping over a
+`Pin<&mut _>` reference, and dropping that has no effect. This is another
+example of how driving an `AsyncIterator` correctly requires _ownership_.
+`Pin<&mut _>` should not implement `AsyncIterator`, and this loop should not
+compile.
 
 ### What about "lending" async iterators?
 
