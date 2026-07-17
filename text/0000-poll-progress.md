@@ -629,13 +629,13 @@ implementations should be able to assume that they'll be polled again promptly
 Is that a good assumption? Do we have consensus on that? What are the other
 options?
 
-I think the clearest argument for this assumption is an analogy to
-multithreading. ["Everybody knows"](https://jacko.io/snooze.html#threads) that
-we can't pause or cancel running threads. If a paused or cancelled thread
-happens to be holding any locks, we'll probably deadlock ourselves. In the dark
-corners of systems programming where we do pause threads, like Unix signal
-handlers, we have to take extraordinary care not to touch any locks in that
-critical section, which means e.g. no allocating memory and no printing.
+The clearest argument for this assumption is an analogy to multithreading.
+["Everybody knows"](https://jacko.io/snooze.html#threads) that we can't pause
+or cancel running threads. If a paused or cancelled thread happens to be
+holding any locks, we'll probably deadlock ourselves. In the dark corners of
+systems programming where we do pause threads, like Unix signal handlers, we
+have to take extraordinary care not to touch any locks in that critical
+section, which means e.g. no allocating memory and no printing.
 
 Async Rust can handle cancellation better than threads do, because `Drop`
 cleans up our lock guards. But _pausing_ a Rust future isn't much different
@@ -649,9 +649,9 @@ async applications will start to feel like writing Unix signal handlers.
 
 Could there be a third way? Maybe there could be some sort of `Drop`-like hook
 that tells futures and async iterators when they're about to be paused or
-resumed. I haven't explored this in any detail, but my first question would be:
-"If I'm holding a lock, what am I supposed to do in that hook? Release the
-lock?" The point of locking is that it lets us group operations together
+resumed. We haven't explored this in any detail, but our first question might
+be: "If we're holding a lock, what are we supposed to do in that hook? Release
+the lock?" The point of locking is that it lets us group operations together
 atomically. If a lock can be _stolen_ from us in the middle of our critical
 section, then it isn't a lock at all. Realistically, this third way would look
 more like lock-free programming. Lock-free code is great, but it's not the
@@ -942,10 +942,9 @@ method. Rust could've defined `poll` to return `Option<Output>`, but the
 `Future` contract is important and subtle enough that it was worth adding a
 separate type to represent it.
 
-I think the same is true of `poll_next` in the new contract. The
-"`PollNext::Item` rule" and the "`PollNext::Pending` rule" are important and
-subtle enough that it's worth defining a distinct return type to represent
-them.
+The same is true of `poll_next` in the new contract. The "`PollNext::Item`
+rule" and the "`PollNext::Pending` rule" are important and subtle enough that
+it's worth defining a distinct return type to represent them.
 
 ### What's the purpose of the `Drop` requirement?
 
@@ -954,13 +953,13 @@ promptly after `poll_next` returns `Done`. That rule isn't essential for the
 goals of the RFC, and if it's controversial, it could be removed without other
 substantial changes. In contrast, the rule about polling an `AsyncIterator`
 promptly after it's created is essential, because it avoids deadlocks in
-expressions like `some_iter.chain(future_unordered)`. I think it's likely that
-we'll want to introduce new lints or warnings to reinforce that "poll promptly"
-requirement, for example something like "Don't hold an idle `AsyncIterator`
-across a suspension point." The proposed `Drop` rule is in the same spirit,
-following the intuition that async iterators shouldn't "sit around" when we're
-not driving them. (Could we say the same of `Future`? See "Future
-possibilities" below, no pun intended.)
+expressions like `some_iter.chain(future_unordered)`. We'll probably want to
+introduce new lints or warnings to reinforce that "poll promptly" requirement,
+for example something like "Don't hold an idle `AsyncIterator` across a
+suspension point." The proposed `Drop` rule is in the same spirit, following
+the intuition that async iterators shouldn't "sit around" when we're not
+driving them. (Could we say the same of `Future`? See "Future possibilities"
+below, no pun intended.)
 
 Most `poll_next` implementations forward `Done`, in which case they don't need
 any extra code or state to follow this rule. (Their responsibility to drop
@@ -1007,9 +1006,9 @@ it, have been discussed for many years. Some points of reference:
 
 ### What other names should we consider for `poll_progress`?
 
-In my experience `poll_progress` is the most common name folks use to refer to
-this feature, but I've also seen `poll_proceed` and `poll_bg`. We'll probably
-want to bikeshed this a bit.
+`poll_progress` is the most common name folks use to refer to this feature, but
+there have been other suggestions, including `poll_proceed` and `poll_bg`.
+We'll probably want to bikeshed this a bit.
 
 ### Should we rename `AsyncIterator` to `Stream`?
 
