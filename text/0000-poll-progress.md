@@ -494,11 +494,11 @@ the first case `LOCK` has already invoked a `Waker`, and in the second case
 `sleep` eventually does -- and we're supposed to poll it or drop it promptly.
 What we're seeing is that, to satisfy the proposed contract, whatever's driving
 an `AsyncIterator` generally needs to _own_ it. That the case with `for await`
-loops, and with terminal consumers like [`for_each`] and [`fold`], but it's a
-problem for `next`.
+loops, and with terminal consumers like [`for_each`] and [`collect`], but it's
+a problem for `next`.
 
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
-[`fold`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.fold
+[`collect`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.collect
 
 Now, the alternatives. The most common use case for `next` today is a loop like
 this:
