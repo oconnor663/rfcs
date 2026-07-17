@@ -461,10 +461,15 @@ The main way users interact with `Stream` in the async ecosystem today is the
 [`StreamExt::next`] method, which returns a future representing the next item
 in the stream. But the `AsyncIterator` contract proposed in this RFC isn't
 compatible with `next`, because the `Next` future is short-lived, and it can't
-keep polling its iterator after it yields an item. (Technically it could call
-`poll_progress` before returning, but it can't respond to wakeups.) Consider
-this modified version of the [original `merge` deadlock above](#motivation)
-([playground link][next1]):
+keep polling its iterator after it yields an item.
+
+> Technically `Next` could call `poll_progress` once before returning, but it
+> can't respond to wakeups after that. Even more technically, it could wait
+> until `poll_progress` returned `Ready` before returning `Ready` itself. But
+> that's not how anybody wants `next` to work.
+
+Consider this modified version of the [original `merge` deadlock
+above][motivation] ([playground link][next1]):
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [next1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++_+%3D+my_iter.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
@@ -475,6 +480,7 @@ _ = my_iter.next().await;
 do_work().await; // Deadlock!
 ```
 
+This isn't something `poll_progress` can fix, because who's going to call it?
 This RFC is focused on concurrency, but the problem with `next` is actually
 broader. Here's a similar example without the `merge`, where the deadlock stems
 from cancellation ([playground link][next2]):
@@ -488,12 +494,12 @@ do_work().await; // Deadlock!
 ```
 
 In both cases, there's an `AsyncIterator` that's ready to make progress -- in
-the first case `LOCK` has invoked a `Waker`, and in the second case `sleep` has
--- and we're supposed to poll it or drop it promptly. But after `next` returns,
-nothing is responsible for doing that. To satisfy the proposed contract,
-whatever's driving an `AsyncIterator` generally needs to _own_ it. That the
-case with `for await` loops, and for terminal consumers like [`for_each`] and
-[`fold`], but it's a problem for `next`.
+the first case `LOCK` has already invoked a `Waker`, and in the second case
+`sleep` eventually does -- and we're supposed to poll it or drop it promptly.
+But after `next` returns, nothing is responsible for doing that. To satisfy the
+proposed contract, whatever's driving an `AsyncIterator` generally needs to
+_own_ it. That the case with `for await` loops, and with terminal consumers
+like [`for_each`] and [`fold`], but it's a problem for `next`.
 
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
 [`fold`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.fold
@@ -1070,12 +1076,12 @@ lints today. Maybe it should. Above we wrote:
 > generally needs to _own_ it.
 
 The relevant part of the contract there is "poll again when you get a wakeup".
-That's just as important for `Future` as it is of `AsyncIterator`. Should we
+That's just as important for `Future` as it is for `AsyncIterator`. Should we
 deprecate helpers that can't live up to that responsibility? Does that include
 the blanket `Future` impls on [`&mut F`][future_blanket_mut] and [`Pin<&mut
 F>`][future_blanket_pin]? They can't be removed at this point, but we could
-warn on code that uses them. We could also warn or lint whenever an idle
-`Future` lives across a suspension point. That wouldn't cover e.g. `Vec<impl
+warn or lint on code that uses them. We could also warn whenever an idle
+`Future` lives across a suspension point. That might not cover e.g. `Vec<impl
 Future>`, but most `Future` containers are themselves futures or async
 iterators, and the corner cases might not matter much in practice.
 
@@ -1083,11 +1089,14 @@ iterators, and the corner cases might not matter much in practice.
 [future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
 A warning like that could've caught ["Futurelock"][futurelock] before it
-happened. On the other hand, there are many `select!` loops in the wild that
-would trigger the same warnings, where there's no widely-used _owning_ pattern
-that can easily replace them today. Improving this situation might need go
-hand-in-hand with [new macros](https://github.com/oconnor663/join_me_maybe) or
-possibly new syntax. Speaking of which...
+happened. On the other hand, there are [many `select!` loops in the
+wild][mini_redis] that would trigger the same warnings, where there's no
+widely-used _owning_ pattern that can easily replace them today. Improving this
+situation might need go hand-in-hand with [new
+macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
+Speaking of which...
+
+[mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 
 ### Concurrency syntax
 
