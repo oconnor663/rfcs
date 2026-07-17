@@ -1040,20 +1040,27 @@ nothing. Would any callers care? Does anyone really need to know whether
 
 ### How should the `Stream` ecosystem migrate?
 
-TODO: This section is not correct. What it's proposing violates the orphan
-rule.
+It would be nice if the `futures-core` crate could add a blanket `impl<Iter:
+AsyncIterator> Stream for Iter`. Unfortunately, that's not compatible with
+`Stream`'s existing blanket impls over `&mut S` and `Pin<P>`. The "What about
+the blanket impls" section argues that `AsyncIterator` shouldn't have those,
+but `Stream` has them, and they're widely used.
 
-A migration for `poll_progress` might not look too different from what we'd
-need to do anyway to move the trait into `core` and integrate `for await` with
-the existing ecosystem of streams. We could add a default, no-op
-`poll_progress` method to `Stream` and a blanket `impl<S: Stream> AsyncIterator
-for S`. The `Stream::poll_next` method would probably retain its current return
-type for compatibility. We'd encourage `Stream` implementations to override the
-default `poll_progress` method ASAP, and until they do they'd have the same
-hang-and-deadlock-prone behavior they have today. We'd also encourage APIs with
-a `Stream` bound to switch to an `AsyncIterator`/`IntoAsyncIterator` bound
-(which should be a compatible change with that blanket impl), because iterators
-returned by `async gen fn` will not implement `futures::Stream`.
+We might need to ask `Stream` implementations to also, separately, implement
+`AsyncIterator`. That's a lot of boilerplate, but it should be simple for for
+non-concurrent streams, which only need to forward `poll_progress` to their
+children. Implementing `AsyncIterator` will be necessary for compatibility with
+`for await`. Consumers with `Stream` bounds will be in a tricky position,
+because they can't migrate to `AsyncIterator` until all of their dependencies
+have added impls, but also `async gen fn` iterators will not implement
+`Stream`.
+
+It's an open question whether `Stream` should add a `poll_progress` method with
+a no-op default implementation. That could help some of the ecosystem get the
+benefits of `poll_progress` before migrating. On the other hand, since `Stream`
+callers frequently use the `next` method, the benefit might be small, and it
+could be more confusing than helpful. Feedback needed from the `futures`
+maintainers.
 
 ## Future possibilities
 [future-possibilities]: #future-possibilities
