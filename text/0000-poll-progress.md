@@ -460,8 +460,8 @@ The main way users interact with `Stream` in the async ecosystem today is the
 [`StreamExt::next`] method, which returns a future representing the next item
 in the stream. But the `AsyncIterator` contract proposed in this RFC isn't
 compatible with `next`, because the `Next` future is short-lived, and it can't
-keep polling its iterator after it yields an item. `AsyncIterator` won't have a
-`next` method, and we'll need a migration plan for existing callers.
+keep polling its iterator after it yields an item. **`AsyncIterator` won't have
+a `next` method,** and we'll need a migration plan for existing callers.
 
 First, the problem. Here's a version of the [original `merge` example
 above][motivation] that deadlocks even with `poll_progress` ([playground
@@ -559,8 +559,8 @@ someday, but this RFC doesn't propose doing that at first.
 `Iterator` has a blanket impl for [`&mut I`][iter_blanket], and today
 `AsyncIterator` (like `Stream`) has similar impls for [`&mut
 I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. But
-the async ones are deadlock-prone, for the same reason as `next` above, and we
-should remove them. Here's another similar deadlock ([playground
+the async ones are deadlock-prone, for the same reason as `next` above, and
+**we should remove them.** Here's another similar deadlock ([playground
 link][blanket_deadlock]):
 
 [iter_blanket]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#impl-Iterator-for-%26mut+I
