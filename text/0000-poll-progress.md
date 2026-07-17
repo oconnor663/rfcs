@@ -1040,6 +1040,9 @@ nothing. Would any callers care? Does anyone really need to know whether
 
 ### How should the `Stream` ecosystem migrate?
 
+TODO: This section is not correct. What it's proposing violates the orphan
+rule.
+
 A migration for `poll_progress` might not look too different from what we'd
 need to do anyway to move the trait into `core` and integrate `for await` with
 the existing ecosystem of streams. We could add a default, no-op
