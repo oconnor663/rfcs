@@ -187,7 +187,7 @@ to contend with, `AsyncIterator` has _five_:
 | --- | --- |
 | `poll_next` returned `PollNext::Item` | <ins><strong>Poll again promptly,</strong></ins> either `poll_next` if you want another item or `poll_progress` if not. |
 | `poll_next` returned `PollNext::Pending` | `poll_next` again after wakeup. <ins><strong>`poll_progress` is not allowed.</strong></ins> |
-| `poll_next` returned `PollNext::Done` | Never poll again. Drop promptly. |
+| `poll_next` returned `PollNext::Done` | Never poll again. |
 | `poll_progress` returned `Poll::Pending` | `poll_next` whenever you want another item, otherwise `poll_progress` again after wakeup. |
 | `poll_progress` returned `Poll::Ready` | `poll_next` whenever you want another item, otherwise stop polling. `poll_progress` is allowed but has no further effect. |
 
@@ -240,39 +240,33 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Iter::Item> {
         let mut this = self.project();
         if let Some(item) = this.item.take() {
-            // If we have a buffered `item`, return it.
-            PollNext::Item(item)
+            PollNext::Item(item) // If we have a buffered `item`, return it.
         } else if let Some(inner) = this.inner.as_mut().as_pin_mut() {
-            // Otherwise poll the `inner` async iterator.
-            inner.poll_next(cx)
+            inner.poll_next(cx) // Otherwise poll the `inner` async iterator...
         } else {
-            // ...unless it was already dropped when we tried to buffer an item. In that case we're done.
-            PollNext::Done
+            PollNext::Done // ...unless it already returned `Done` in `poll_progress`.
         }
     }
 
     fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         let mut this = self.project();
         let Some(mut inner) = this.inner.as_mut().as_pin_mut() else {
-            // The `inner` iterator is already done.
-            return Poll::Ready(());
+            return Poll::Ready(()); // The `inner` iterator is already done.
         };
         if this.item.is_none() {
-            // We don't have a buffered `item`. Try to get one.
-            match inner.as_mut().poll_next(cx) {
+            match inner.as_mut().poll_next(cx) { // We don't have a buffered `item`. Try to get one.
                 PollNext::Item(item) => {
                     *this.item = Some(item);
-                    inner.poll_progress(cx) // required
+                    inner.poll_progress(cx) // `poll_progress` is necessary.
                 }
-                PollNext::Pending => Poll::Pending,
+                PollNext::Pending => Poll::Pending, // `poll_progress` is forbidden.
                 PollNext::Done => {
-                    this.inner.set(None); // required
+                    this.inner.set(None); // `inner` should not be polled again.
                     Poll::Ready(())
                 }
             }
         } else {
-            // We already have a buffered `item`.
-            inner.poll_progress(cx)
+            inner.poll_progress(cx) // We already have a buffered `item`.
         }
     }
 }
@@ -281,13 +275,12 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
 Note that when `inner.poll_next` returns `Item`, `Buffer1::poll_next` returns
 immediately without doing any further polling. That might look like it violates
 the "`PollNext::Item` rule" about polling again promptly, however, the same
-rule applies _to the caller_. The caller will poll again, and when they do,
-`inner` will get polled again. Similarly, `Buffer1::poll_next` doesn't need to
-drop `inner` when it returns `Done`, because the caller will drop the whole
-`Buffer1`. However, `Buffer1::poll_progress` doesn't impose the same rule on
-its caller, so it must call `inner.poll_progress` in its `Item` branch and drop
-`inner` in its `Done` branch. (In practice we might replace `Option<Iter>` with
-`Fuse<Iter>`, which could handle `Drop` internally and save us a few lines.)
+rule applies _to the caller_. The caller must poll again, and when they do,
+`inner` will get polled again. Similarly, if `inner.poll_next` returns `Done`,
+the caller must _not_ poll again, and `inner` will not get polled again.
+However, `Buffer1::poll_progress` doesn't impose the same requirements on its
+caller, so it needs to call `inner.poll_progress` in its `Item` branch, and it
+needs to clear `inner` in its `Done` branch.
 
 Note also that `Buffer1::poll_progress` doesn't call `inner.poll_progress`
 after `inner.poll_next` returns `Pending`. That's the "`PollNext::Pending`
@@ -856,7 +849,7 @@ link][playground_map_lazy], using `for_each` instead of `for await`):
 ```rs
 struct Map<Iter, F, T> {
     #[pin]
-    iter: Fuse<Iter>, // Assume we have a `Fuse` helper that handles dropping.
+    iter: Fuse<Iter>, // Assume we have a `Fuse` helper that handles `Done`.
     next_item_wanted: bool,
     f: F,
     item: Option<T>,
@@ -944,45 +937,6 @@ separate type to represent it.
 The same is true of `poll_next` in the new contract. The "`PollNext::Item`
 rule" and the "`PollNext::Pending` rule" are important and subtle enough that
 it's worth defining a distinct return type to represent them.
-
-### What's the purpose of the `Drop` requirement?
-
-The proposed `AsyncIterator` contract requires the caller to drop an iterator
-promptly after `poll_next` returns `Done`. That rule isn't essential for the
-goals of the RFC, and if it's controversial, it could be removed without other
-substantial changes. In contrast, the rule about polling an `AsyncIterator`
-promptly after it's created is essential, because it avoids deadlocks in
-expressions like `some_iter.chain(future_unordered)`. We'll probably want to
-introduce new lints or warnings to reinforce that "poll promptly" requirement,
-for example something like "Don't hold an idle `AsyncIterator` across a
-suspension point." The proposed `Drop` rule is in the same spirit, following
-the intuition that async iterators shouldn't "sit around" when we're not
-driving them. (Could we say the same of `Future`? See "Future possibilities"
-below, no pun intended.)
-
-Most `poll_next` implementations forward `Done`, in which case they don't need
-any extra code or state to follow this rule. (Their responsibility to drop
-their children becomes their caller's responsibility to drop them.) The
-combinators that would need handling for this are concurrent ones like `Merge`
-and `Buffer1`, read-ahead ones like [`Peekable`] and [`Chunks`], and [`Fuse`]
-as a special case. In practice, most of those would satisfy the requirement by
-using `Fuse` internally.
-
-[`Peekable`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.peekable
-[`Chunks`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chunks
-[`Fuse`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse
-
-[`ForEach`] is an interesting case, because it's always done as soon as its
-inner iterator is done. (It doesn't read ahead, so it doesn't observe `Done`
-from the inner iterator until after it executes the body closure for the last
-item.) If it could rely on its caller to drop it, it would also satisfy the
-`Drop` rule automatically. But `ForEach` is a `Future`, not an `AsyncIterator`,
-and `Future` doesn't document a similar `Drop` rule. If we like the idea of the
-`Drop` rule, we might want to document a similar one for `Future` at the same
-time. That would match the current behavior of e.g. [`futures::future::Fuse`].
-
-[`ForEach`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
-[`futures::future::Fuse`]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
 
 ## Prior art
 [prior-art]: #prior-art
@@ -1100,7 +1054,7 @@ iterators, and the corner cases might not matter much in practice.
 
 A warning like that could've caught ["Futurelock"][futurelock] before it
 happened. On the other hand, there are [many `select!` loops in the
-wild][mini_redis] that would trigger the same warnings, where there's no
+wild][mini_redis] that would trigger the same warning, where there's no
 widely-used _owning_ pattern that can easily replace them today. Improving this
 situation might need go hand-in-hand with [new
 macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
@@ -1172,7 +1126,7 @@ async fn bar() -> anyhow::Result<()> {
 > suggests a counterpart, `await any`...`or`. The former could have branches of
 > different types, and it would evaluate to a tuple, while the latter would
 > have branches of the same type, and it would evaluate to a single value. This
-> would be the "built-in version of `select!`". It could also allow conflicting
+> would be "the built-in version of `select!`". It could also allow conflicting
 > _moves_ after the final suspension point in each branch, since only one
 > branch ever makes it that far.
 
