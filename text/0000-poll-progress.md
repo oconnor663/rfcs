@@ -274,13 +274,13 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
 
 Note that when `inner.poll_next` returns `Item`, `Buffer1::poll_next` returns
 immediately without doing any further polling. That might look like it violates
-the "`PollNext::Item` rule" about polling again promptly, however, the same
-rule applies _to the caller_. The caller must poll again, and when they do,
-`inner` will get polled again. Similarly, if `inner.poll_next` returns `Done`,
-the caller must _not_ poll again, and `inner` will not get polled again.
-However, `Buffer1::poll_progress` doesn't impose the same requirements on its
-caller, so it needs to call `inner.poll_progress` in its `Item` branch, and it
-needs to clear `inner` in its `Done` branch.
+the "`PollNext::Item` rule" about polling again promptly, but the same rule
+applies _to the caller_. The caller must poll again, and when they do, `inner`
+will get polled again. Similarly, if `inner.poll_next` returns `Done`, the
+caller must _not_ poll again, and `inner` will not get polled again. However,
+`Buffer1::poll_progress` doesn't impose the same requirements on its caller, so
+it needs to call `inner.poll_progress` in its `Item` branch, and it needs to
+clear `inner` in its `Done` branch.
 
 Note also that `Buffer1::poll_progress` doesn't call `inner.poll_progress`
 after `inner.poll_next` returns `Pending`. That's the "`PollNext::Pending`
@@ -456,9 +456,8 @@ compatible with `next`, because the `Next` future is short-lived, and it can't
 keep polling its iterator after it yields an item. **`AsyncIterator` won't have
 a `next` method,** and we'll need a migration plan for existing callers.
 
-First, the problem. Here's a version of the [original `merge` example
-above][motivation] that deadlocks even with `poll_progress` ([playground
-link][next1]):
+First, the problem. Here's a version of [the `merge` deadlock
+above][motivation] that `poll_progress` can't fix ([playground link][next1]):
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [next1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++_+%3D+my_iter.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
@@ -469,10 +468,11 @@ _ = my_iter.next().await;
 do_work().await; // Deadlock!
 ```
 
-In theory something's supposed to call `my_iter.poll_progress` when `do_work`
-is pending, but there's no `for await` here to do that automatically, and the
-`Next` future is gone. Here's another example, this time without the `merge`,
-where the deadlock stems from cancellation ([playground link][next2]):
+In theory we're supposed to call `my_iter.poll_progress` while `do_work` is
+pending, but there isn't a `for await` loop doing that for us, and the `Next`
+future is gone. Also, here's another version without the `merge`, where the
+deadlock stems from cancellation rather than concurrency ([playground
+link][next2]):
 
 [next2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+my_iter.next%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
@@ -484,11 +484,11 @@ do_work().await; // Deadlock!
 
 In both cases, there's an `AsyncIterator` that's ready to make progress -- in
 the first case `LOCK` has already invoked a `Waker`, and in the second case
-`sleep` eventually does -- and we're supposed to poll it or drop it promptly.
-What we're seeing is that, to satisfy the proposed contract, whatever's driving
-an `AsyncIterator` generally needs to _own_ it. That the case with `for await`
-loops, and with terminal consumers like [`for_each`] and [`collect`], but it's
-a problem for `next`.
+`sleep` eventually does -- and somebody's supposed to poll it or drop it
+promptly. But who? The caller? What we're seeing is that, to satisfy the
+proposed contract, whatever's driving an `AsyncIterator` generally needs to
+_own_ it. That's the case with `for await` loops, and with terminal consumers
+like [`for_each`] and [`collect`], but it's a problem for `next`.
 
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
 [`collect`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.collect
@@ -501,7 +501,7 @@ let mut stream = pin!(...);
 while let Some(item) = stream.next().await { ... }
 ```
 
-Those common cases can be replaced with a `for await` loop:
+These can be replaced with `for await` loops:
 
 ```rs
 for await item in stream { ... }
@@ -529,14 +529,14 @@ loop {
 }
 ```
 
-In this example, the caller is iterating over a `FuturesUnordered` and also
-adding more work to it in the loop body. We can't reorganize this around a `for
-await`, because that would take ownership of `futures`, and `futures.push(job)`
-wouldn't compile. Patterns like this aren't the most common, but sometimes they
-sit at the core of larger application loops, and migrating away from them can
-be impractical.
+This caller is iterating over a `FuturesUnordered` and also adding more work to
+it in the loop body. We can't reorganize this around a `for await`, because
+that would take ownership of `futures`, and `futures.push(job)` wouldn't
+compile. Sometimes we can replace things like this with task spawning, but
+there are cases where the borrowing and mutability details make that [very
+difficult][mini_redis].
 
-In these difficult cases, it's possible to recreate the `next` method in a
+In the difficult cases, we can recreate the `next` method in a
 `poll_progress`-compatible way using a macro. Here's a [working
 proof-of-concept][drive], which takes ownership of an async iterator and
 provides a handle with `next` and `with_mut` methods on it. Apart from easing
@@ -553,9 +553,8 @@ someday, but this RFC doesn't propose doing that at first.
 I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. **We
 should remove these impls,** because driving an `AsyncIterator` by reference is
 deadlock-prone. (We'll keep the boxed ones.) The problem is similar to what we
-saw above with `next` ([playground link][blanket_deadlock]):
+just saw with `next` above ([playground link][blanket_deadlock]):
 
-[iter_blanket]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#impl-Iterator-for-%26mut+I
 [async_iter_blanket_mut]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-%26mut+S
 [async_iter_blanket_pin]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-Pin%3CP%3E
 [blanket_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt%2C+once%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++%2F%2F+Replace+this+loop+with+a+%60Stream%60+equivalent+that+runs+today.%0A++++%2F%2F+for+await+_+in+my_iter+%7B%0A++++%2F%2F+++++break%3B%0A++++%2F%2F+%7D%0A++++StreamExt%3A%3Atake%28my_iter%2C+1%29.for_each%28async+%7C_%7C+%7B%7D%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
@@ -1001,8 +1000,8 @@ AsyncIterator> Stream for Iter`. Unfortunately, that would overlap with
 `Stream`'s existing blanket impls.
 
 We might need to ask `Stream` implementations to also, separately, implement
-`AsyncIterator`. That's a lot of boilerplate, but it should be simple for for
-non-concurrent streams, which only need to forward `poll_progress` to their
+`AsyncIterator`. That's a lot of boilerplate, but it should be straightforward
+for non-concurrent streams, which only need to forward `poll_progress` to their
 children. Implementing `AsyncIterator` will be necessary for compatibility with
 `for await`. Consumers with `Stream` bounds will be in a tricky position,
 because they can't migrate to `AsyncIterator` until all of their dependencies
@@ -1056,11 +1055,9 @@ A warning like that could've caught ["Futurelock"][futurelock] before it
 happened. On the other hand, there are [many `select!` loops in the
 wild][mini_redis] that would trigger the same warning, where there's no
 widely-used _owning_ pattern that can easily replace them today. Improving this
-situation might need go hand-in-hand with [new
+situation might need to go hand-in-hand with [new
 macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
 Speaking of which...
-
-[mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 
 ### Concurrency syntax
 
@@ -1189,8 +1186,8 @@ async gen fn foo() -> u32 {
 These spots are a surprisingly good fit for coroutine inputs and return values.
 In the `gen fn` / `async gen fn` syntax, an input item would become the value
 of the currently suspended `yield` expression, and the return value of the body
-would be final value of the coroutine. In the `for` / `for await` syntax, the
-final value could become the value of the loop itself, and the input items
+would be the final value of the coroutine. In the `for` / `for await` syntax,
+the final value could become the value of the loop itself, and the input items
 could come from the value of the body. (This would suggest that `break` would
 need a value of the same type as the final value, and `continue` would need a
 value of the same type as the inputs.)
@@ -1225,3 +1222,4 @@ need a way to come up with input values, which might be possible in some cases
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [drive]: https://github.com/oconnor663/drive_async_iterator
+[mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
