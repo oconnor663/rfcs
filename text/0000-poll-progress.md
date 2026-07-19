@@ -692,7 +692,7 @@ conditional buffering there. That's a downside. The upside is that
 
 ```rs
 fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
-    debug_assert!(self.future.is_none());
+    assert!(self.future.is_none());
     self.project().stream.poll_progress(cx)
 }
 ```
