@@ -689,13 +689,16 @@ fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
 }
 ```
 
-`Then::poll_progress` doesn't need to worry about what to do with `self.future`
-or its output, because it can only be called when `self.future` is `None`.
-Similarly, it never needs to call `stream.poll_next`, because it will never be
-called after `poll_next` returns `Pending`. Simple adapters like `Map` and
-`Then` are more common than concurrent ones like `Merge` and `Buffer1`, both in
-terms of how many implementations we need to write and also how many instances
-appear in iterator chains. Keeping the simple things simple is a good trade.
+`Then::poll_progress` doesn't need to worry about what to do with
+[`self.future`] or its output, because it can only be called when `self.future`
+is `None`. Similarly, it never needs to call `stream.poll_next`, because it
+will never be called after `poll_next` returns `Pending`. Simple adapters like
+`Map` and `Then` are more common than concurrent ones like `Merge` and
+`Buffer1`, both in terms of how many implementations we need to write and also
+how many instances appear in chains of iterators. Keeping the simple things
+simple is a good trade.
+
+[`self.future`]: https://docs.rs/futures-util/0.3.33/src/futures_util/stream/stream/then.rs.html#14-20
 
 Another upside of the `PollNext::Pending` rule compared to the alternative is
 that it's clear when it's been violated, and we can write asserts like the one
