@@ -175,13 +175,13 @@ Like `Future::poll`, the return values of these methods impose certain
 requirements on their callers. But while `Future` only has two possible returns
 to contend with, `AsyncIterator` has _five_:
 
-| Previous return | You are required to... |
+| Previous return | Requirements |
 | --- | --- |
-| `poll_next` returned `PollNext::Item` | <ins><strong>Poll again promptly,</strong></ins> either `poll_next` if you want another item or `poll_progress` if not. |
-| `poll_next` returned `PollNext::Pending` | `poll_next` again after wakeup. <ins><strong>`poll_progress` is not allowed.</strong></ins> |
-| `poll_next` returned `PollNext::Done` | Never poll again. |
-| `poll_progress` returned `Poll::Pending` | `poll_next` whenever you want another item, otherwise `poll_progress` again after wakeup. |
-| `poll_progress` returned `Poll::Ready` | `poll_next` whenever you want another item, otherwise stop polling. `poll_progress` is allowed but has no further effect. |
+| `poll_next` returned `PollNext::Item` | You must <ins><strong>poll again promptly,</strong></ins> either `poll_next` if you want another item or `poll_progress` if not. |
+| `poll_next` returned `PollNext::Pending` | You must `poll_next` again after wakeup. <ins><strong>`poll_progress` is not allowed.</strong></ins> |
+| `poll_next` returned `PollNext::Done` | You must not poll again. |
+| `poll_progress` returned `Poll::Pending` | You can `poll_next` when you want another item, otherwise you must `poll_progress` again after wakeup. |
+| `poll_progress` returned `Poll::Ready` | No requirements. You can `poll_next` when you want another item, or you can stop polling. `poll_progress` is allowed but usually has no effect. |
 
 An `AsyncIterator` begins life in the first state above, expecting a prompt
 call to either `poll_next` or `poll_progress`. Although a `for await` loop will
