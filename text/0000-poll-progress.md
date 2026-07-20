@@ -222,7 +222,7 @@ background:
 ```rs
 struct Buffer1<Iter: AsyncIterator> {
     #[pin] // TODO: a standard way to do structural pinning in examples?
-    inner: Option<Iter>,
+    inner: Fuse<Iter>,
     item: Option<Iter::Item>,
 }
 
@@ -230,35 +230,27 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
     type Item = Iter::Item;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Iter::Item> {
-        let mut this = self.project();
+        let this = self.project();
         if let Some(item) = this.item.take() {
             PollNext::Item(item) // If we have a buffered `item`, return it.
-        } else if let Some(inner) = this.inner.as_mut().as_pin_mut() {
-            inner.poll_next(cx) // Otherwise poll the `inner` async iterator...
         } else {
-            PollNext::Done // ...unless it already returned `Done` in `poll_progress`.
+            this.inner.poll_next(cx) // Otherwise poll the `inner` async iterator.
         }
     }
 
     fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
         let mut this = self.project();
-        let Some(mut inner) = this.inner.as_mut().as_pin_mut() else {
-            return Poll::Ready(()); // The `inner` iterator is already done.
-        };
         if this.item.is_none() {
-            match inner.as_mut().poll_next(cx) { // We don't have a buffered `item`. Try to get one.
+            match this.inner.as_mut().poll_next(cx) { // We don't have a buffered `item`. Try to get one.
                 PollNext::Item(item) => {
                     *this.item = Some(item);
-                    inner.poll_progress(cx) // `poll_progress` is necessary.
+                    this.inner.poll_progress(cx) // `poll_progress` is necessary.
                 }
                 PollNext::Pending => Poll::Pending, // `poll_progress` is forbidden.
-                PollNext::Done => {
-                    this.inner.set(None); // `inner` should not be polled again.
-                    Poll::Ready(())
-                }
+                PollNext::Done => Poll::Ready(()), // `inner` is fused.
             }
         } else {
-            inner.poll_progress(cx) // We already have a buffered `item`.
+            this.inner.poll_progress(cx) // We already have a buffered `item`.
         }
     }
 }
@@ -268,17 +260,19 @@ Look at how `Buffer1::poll_next` returns the result of `inner.poll_next`
 directly, without doing any further polling. That might seem like it violates
 the "`PollNext::Item` rule" about polling again promptly, but note that the
 same rule applies _to the caller_. The caller must poll again, and when they
-do, `inner` will get polled again. Similarly, if `Buffer1::poll_next` returns
-`Done`, the caller must _not_ poll again, and `inner` will not get polled
-again. However, `Buffer1::poll_progress` doesn't impose the same requirements
-on its caller, so it does need to call `inner.poll_progress` in its `Item`
-branch and clear `inner` in its `Done` branch.
+do, `inner` will get polled again. However, `Buffer1::poll_progress` doesn't
+impose the same requirements on its caller, so it does need to call
+`inner.poll_progress` in its `Item` branch. (The `inner` iterator is
+["fused"][`Fuse`], so the `Done` state is handled automatically.)
 
-Note also that `Buffer1::poll_progress` doesn't call `inner.poll_progress`
-after `inner.poll_next` returns `Pending`. That's the "`PollNext::Pending`
-rule". The next poll will be either `Buffer1::poll_next` when the caller wants
-another item, or else `Buffer1::poll_progress` calling `inner.poll_next` again
-after a wakeup.
+[`Fuse`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse
+
+Note also that `Buffer1::poll_progress` follows the "`PollNext::Pending` rule"
+and doesn't call `inner.poll_progress` after `inner.poll_next` returns
+`Pending`. The next poll will be either `Buffer1::poll_next` if the caller
+wants another item, or else `Buffer1::poll_progress` calling `inner.poll_next`
+again after a wakeup. When we do have a buffered item, we know the last call to
+`inner.poll_next` returned `Item`, and we forward `poll_progress`.
 
 ### [`FuturesUnordered`] docs
 
@@ -826,7 +820,7 @@ gen fn`, but we have to tolerate a "lazy" `Merge`, then `Map` also needs a
 ```rs
 struct Map<Iter, F, T> {
     #[pin]
-    iter: Fuse<Iter>, // Assume we have a `Fuse` helper that handles `Done`.
+    iter: Fuse<Iter>,
     next_item_wanted: bool,
     f: F,
     item: Option<T>,
