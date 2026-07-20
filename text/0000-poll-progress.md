@@ -351,20 +351,28 @@ finished, we loop around and print `got B` immediately.
 
 We can't desugar this RFC's version of `for await` syntax into a loop (the way
 the Reference does for [the `for` keyword][for]), because we'd need to treat
-the body as a future (e.g. `await { /* body */ }`) to intercept `Pending` and
-call `poll_progress` in the right place, but that's incompatible with `return`,
-`?`, `break`, or `continue` in the body.
+the body as a future (e.g. `await { /* loop body */ }`) to intercept `Pending`
+and call `poll_progress` in the right place, but that's incompatible with
+`return`, `?`, `break`, or `continue` in the body.
 
 [for]: https://doc.rust-lang.org/reference/expressions/loop-expr.html#r-expr.loop.for.desugar
 
 Instead we can describe the steps `for await` takes internally, [the same way
-`.await` is described][await]:
+`.await` is described][await]. To evaluate the expression:
 
 [await]: https://doc.rust-lang.org/reference/expressions/await-expr.html#r-expr.await.effects
 
-1. Create an async iterator by calling `IntoAsyncIterator::into_async_iter` on
-   the iterator expression.
-2. Pin the async iterator using `Pin::new_unchecked`.
+```
+'label: for await PATTERN in ITER_EXPR {
+    /* loop body */
+}
+```
+
+We execute the following steps:
+
+1. Create an async iterator with
+   `IntoAsyncIterator::into_async_iter(ITER_EXPR)`.
+2. Pin it using `Pin::new_unchecked`.
 3. Poll it by calling the `AsyncIterator::poll_next` method and passing it the
    current task context.
 4. If the call to `poll_next` returns `PollNext::Pending`, then the surrounding
@@ -372,7 +380,7 @@ Instead we can describe the steps `for await` takes internally, [the same way
    `PollNext::Pending`), suspending its state so that, when it's re-polled,
    execution returns to step 3.
 5. If the call to `poll_next` returns `PollNext::Done`, then the loop drops the
-   async iterator and evaluates to `()`.
+   async iterator and evaluates to `()`. Skip the remaining steps.
 6. If the call to `poll_next` returns `PollNext::Item(item)`, then `item` is
    matched against the irrefutable `PATTERN`.
 7. Control proceeds through the loop body, with the bindings from `PATTERN` in
