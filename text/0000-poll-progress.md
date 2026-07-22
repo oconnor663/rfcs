@@ -99,18 +99,26 @@ link][poll_progress_playground]):
 
 [poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4e197c54d0fc05b5b720b19adee19363
 
-1. When `do_work` in the loop body sees that `LOCK` is already taken, it
-   stashes its `Waker` in the lock's waiters queue before reporting `Pending`.
-   (This part isn't new. It's how async locks work today.)
+1. When `do_work` in the loop body sees that `LOCK` is already taken, it adds
+   its `Waker` to the lock's waiters queue before reporting `Pending`. (This
+   part isn't new. It's how async locks work today.)
 2. Because `main` is in the middle of a `for await` loop, it calls
    `poll_progress` on the loop's iterator before reporting `Pending` itself.
-3. `Merge::poll_progress` polls its other child and runs its remaining
-   `do_work` future to completion.
-4. When that `do_work` future drops its guard, it invokes the `Waker` that the
-   body stashed.
-5. Because the `Waker` was invoked, the executor re-polls `main` immediately.
-6. This time, `do_work` in the loop body successfully acquires `LOCK` and runs
-   to completion.
+3. `Merge::poll_progress` polls its other child (the one that hasn't yielded an
+   item), which acquires `LOCK`, registers its `Waker` with the runtime's
+   sleep/timer implementation, and returns `Pending`. `Merge::poll_progress`
+   returns `Pending` itself, and `main`'s `poll` function also returns
+   `Pending`.
+4. After 10 ms, the runtime invokes the sleep `Waker` from step 3 and polls
+   `main` again.
+5. `do_work` in the loop body tries the lock again, fails to acquire it, and
+   returns `Pending` again.
+6. As in step 2, `main` calls `Merge::poll_progress`. It polls its other child
+   again, and this time the child future drops its lock guard and exits.
+7. Dropping that guard invokes the `Waker` that the body registered in step 1,
+   which causes the runtime to re-poll `main` immediately.
+8. This time, `do_work` in the loop body successfully acquires `LOCK`, and it
+   eventually runs to completion.
 
 There's a lot of async machinery there, most of which already exists today and
 isn't specific to `poll_progress`. But the key difference is that now `for
