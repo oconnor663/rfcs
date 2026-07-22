@@ -74,14 +74,15 @@ async fn main() {
 ```
 
 [`Merge`] doesn't implement `AsyncIterator` today, so this example doesn't
-compile as written, but you can run it on stable by [replacing `for await` with
-`for_each`][for_each_playground]. When control enters the loop body, the right
-side of the `Merge` still holds a `do_work` future, which is suspended at the
-point where it has tried to acquire `LOCK` and taken a spot in its waiters
-queue. The call to `do_work` in the body tries to acquire `LOCK` again, but the
-waiter at the front of the queue never wakes up, so it's deadlocked.
+compile as written, but you can run it on stable by replacing `for await` with
+`for_each` ([playground link][for_each_playground]). When control enters the
+loop body, the right side of the `Merge` still holds a `do_work` future, which
+is suspended at the point where it has tried to acquire `LOCK` and taken a spot
+in its waiters queue. The call to `do_work` in the body tries to acquire `LOCK`
+again, but the waiter at the front of the queue never wakes up, so it's
+deadlocked.
 
-[for_each_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aonce%28do_work%28%29%29%0A++++++++.merge%28stream%3A%3Aonce%28do_work%28%29%29%29%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
+[for_each_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt+as+_%2C+once%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_iter+%3D+once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%3B%0A++++my_iter%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
 We usually talk about hangs and deadlocks like these [in the context of "fancy"
 async iterators like `FuturesUnordered` or `buffered` streams][barbara], but
@@ -92,24 +93,29 @@ To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
 futures they contain. That means that `for await` and other consumers need a
 way to let an iterator make progress, even when they're not ready to take the
-next item. That mechanism is `poll_progress`. How does it break this deadlock?
+next item. That mechanism is `poll_progress`, a new required method on the
+`AsyncIterator` trait. How does it break this deadlock? ([playground
+link][poll_progress_playground]):
+
+[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4e197c54d0fc05b5b720b19adee19363
 
 1. When `do_work` in the loop body sees that `LOCK` is already taken, it
    stashes its `Waker` in the lock's waiters queue before reporting `Pending`.
+   (This part isn't new. It's how async locks work today.)
 2. Because `main` is in the middle of a `for await` loop, it calls
    `poll_progress` on the loop's iterator before reporting `Pending` itself.
 3. `Merge::poll_progress` polls its right child and runs its remaining
    `do_work` future to completion.
-4. When that `do_work` future drops its `_guard`, it invokes the `Waker` that
-   the body stashed.
-5. Because the `Waker` was invoked, Tokio re-polls `main` immediately.
+4. When that `do_work` future drops its guard, it invokes the `Waker` that the
+   body stashed.
+5. Because the `Waker` was invoked, the executor re-polls `main` immediately.
 6. This time, `do_work` in the loop body successfully acquires `LOCK` and runs
    to completion.
 
 There's a lot of async machinery there, most of which already exists today and
 isn't specific to `poll_progress`. But the key difference is that now `for
 await` and `Merge` cooperate to guarantee that, once they start running an
-`async fn`, they'll _keep running it_ until it's done (or cancelled). As users,
+`async fn`, they'll _keep running it_ until it's done (or cancelled). As users
 that's all we need to know, and we can focus on dropping our lock guards in the
 right places, just like we would in synchronous code.
 
