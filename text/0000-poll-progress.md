@@ -104,7 +104,7 @@ link][poll_progress_playground]):
    (This part isn't new. It's how async locks work today.)
 2. Because `main` is in the middle of a `for await` loop, it calls
    `poll_progress` on the loop's iterator before reporting `Pending` itself.
-3. `Merge::poll_progress` polls its right child and runs its remaining
+3. `Merge::poll_progress` polls its other child and runs its remaining
    `do_work` future to completion.
 4. When that `do_work` future drops its guard, it invokes the `Waker` that the
    body stashed.
@@ -419,36 +419,38 @@ innermost.
 
 ### `async gen fn`
 
-An `async gen fn` returns an `AsyncIterator` implementation. If control in the
-`async gen fn` is at a `yield` in the body of a `for await` loop, then the
-`poll_progress` method on the returned `AsyncIterator` calls `poll_progress` on
-that loop's iterator. If `for await` loops are nested, there may be multiple
-such iterators, and `poll_progress` gets forwarded to all of them, starting
-with the innermost. If any of the forwarded `poll_progress` calls is pending,
-then `poll_progress` on the returned `AsyncIterator` also returns `Pending`,
-otherwise it returns `Ready`.
+The `AsyncIterator` contract limits the cases where it's valid to call
+`poll_progress`. There are only two:
+
+1. `poll_next` has never been called.
+2. The previous call to `poll_next` returned `Item`.
+
+In an `async gen fn` -- that is, in the anonymous `AsyncIterator`
+implementation returned by an `async gen fn` -- those cases correspond to the
+initial state where control hasn't yet entered the body, and to the states
+where control is suspended at a `yield` expression. Importantly, in the states
+where control is suspended at a pending `.await` or `for await`, we know that
+the previous call to `poll_next` returned `Pending`, so calling `poll_progress`
+is not valid. (The implementation panics if it receives such a call, though
+that isn't required by the contract.) This gives us an important
+simplification: **Only `poll_next` advances control through the body of an
+`async gen fn`.**
+
+In contrast, `poll_progress` has a limited responsibility: If control is
+suspended at a `yield` in the body of a `for await` loop, then the `async gen
+fn`'s implementation of `poll_progress` calls `poll_progress` on that loop's
+iterator. If `for await` loops are nested, there may be multiple such
+iterators, and `poll_progress` gets forwarded to all of them, starting with the
+innermost. If any of the forwarded calls returns `Pending`, then
+`poll_progress` returns `Pending`, otherwise it returns `Ready`.
 
 Note that when control reaches a `yield`, that by itself does not necessarily
-imply a call to `poll_progress` on any active iterators. If the caller's loop
-doesn't encounter a pending `.await`, then nothing will call `poll_progress`,
-and control will resume from the `yield` promptly instead (unless cancelled).
-
-Note also that `poll_progress` should *only* be called on the returned
-`AsyncIterator` while control is suspended at a `yield`, *not* while it's
-suspended at an `.await`. 
-
-Note also that when control is suspended at a pending `.await` (i.e the last
-call to `poll_next` returned `Pending`), `poll_progress` should not be called
-on the returned `AsyncIterator`. That's the "`PollNext::Pending` rule" in the
-`AsyncIterator` contract. Typically, if the caller is a `for await` loop over
-this `async gen fn`, 
-
-(Concretely, if its caller is using `for await`, the caller is currently in
-step 3 above, not step 7.) In that case, it's the returned `AsyncIterator`'s
-`poll_next` method that's responsible for driving progress in any other async
-iterators it's looping over, following the rules in the previous section. If
-`poll_progress` is called on the returned iterator while an `.await` is
-pending, it should panic.
+imply a call to `poll_progress` on any active iterators. If the caller doesn't
+encounter a pending `.await`, then nothing will call `poll_progress`, and
+control will resume from the `yield` promptly instead (unless cancelled). In
+terms of the `AsyncIterator` contract, that's the case where a call to
+`poll_next` that returns `Item` is followed by another prompt call to
+`poll_next`, rather than a call to `poll_progress`.
 
 For example:
 
@@ -458,7 +460,7 @@ async gen fn foo() {
         for await _ in baz() {
             // While this expression is pending, `foo`'s `poll_next` function calls `poll_progress` on the
             // `baz` and `bar` async iterators before reporting pending itself. The `AsyncIterator` contract
-            // forbids calling `foo`'s `poll_progress` function in this state. If it is called, it will panic.
+            // forbids calling `foo`'s `poll_progress` function in this state, and `foo` will panic if you do.
             do_work().await;
 
             // While control is suspended at this `yield`, `foo`'s `poll_progress` function calls
