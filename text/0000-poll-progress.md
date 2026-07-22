@@ -92,9 +92,26 @@ To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators like these need to continuously drive the
 futures they contain. That means that `for await` and other consumers need a
 way to let an iterator make progress, even when they're not ready to take the
-next item. The new `poll_progress` method is how they'll do this. It comes with
-new contract requirements, and to emphasize those we'll change the return type
-of `poll_next` from `Poll<Option<_>>` to a dedicated `PollNext` enum.
+next item. That mechanism is `poll_progress`. How does it break this deadlock?
+
+1. When `do_work` in the loop body sees that `LOCK` is already taken, it
+   stashes its `Waker` in the lock's waiters queue before reporting `Pending`.
+2. Because `main` is in the middle of a `for await` loop, it calls
+   `poll_progress` on the loop's iterator before reporting `Pending` itself.
+3. `Merge::poll_progress` polls its right child and runs its remaining
+   `do_work` future to completion.
+4. When that `do_work` future drops its `_guard`, it invokes the `Waker` that
+   the body stashed.
+5. Because the `Waker` was invoked, Tokio re-polls `main` immediately.
+6. This time, `do_work` in the loop body successfully acquires `LOCK` and runs
+   to completion.
+
+There's a lot of async machinery there, most of which already exists today and
+isn't specific to `poll_progress`. But the key difference is that now `for
+await` and `Merge` cooperate to guarantee that, once they start running an
+`async fn`, they'll _keep running it_ until it's done (or cancelled). As users,
+that's all we need to know, and we can focus on dropping our lock guards in the
+right places, just like we would in synchronous code.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -410,9 +427,16 @@ imply a call to `poll_progress` on any active iterators. If the caller's loop
 doesn't encounter a pending `.await`, then nothing will call `poll_progress`,
 and control will resume from the `yield` promptly instead (unless cancelled).
 
-Note also that when control is suspended at a pending `.await` in an `async gen
-fn`, `poll_progress` should not be called on the returned `AsyncIterator`,
-because the last call to its `poll_next` method returned `Pending`.
+Note also that `poll_progress` should *only* be called on the returned
+`AsyncIterator` while control is suspended at a `yield`, *not* while it's
+suspended at an `.await`. 
+
+Note also that when control is suspended at a pending `.await` (i.e the last
+call to `poll_next` returned `Pending`), `poll_progress` should not be called
+on the returned `AsyncIterator`. That's the "`PollNext::Pending` rule" in the
+`AsyncIterator` contract. Typically, if the caller is a `for await` loop over
+this `async gen fn`, 
+
 (Concretely, if its caller is using `for await`, the caller is currently in
 step 3 above, not step 7.) In that case, it's the returned `AsyncIterator`'s
 `poll_next` method that's responsible for driving progress in any other async
