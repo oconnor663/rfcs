@@ -200,8 +200,6 @@ When no more internal progress is possible without calling `poll_next` again,
 loop is pending, the loop calls `poll_progress` on its iterator before
 reporting pending itself.
 
-[`Poll::Pending`]: https://doc.rust-lang.org/std/task/enum.Poll.html
-
 Like `Future::poll`, the return values of these methods impose certain
 requirements on their callers. But while `Future` only has two possible returns
 to contend with, `AsyncIterator` has _five_:
@@ -382,7 +380,7 @@ finished, we loop around and print `got B` immediately.
 
 We can't desugar this RFC's version of `for await` syntax into a loop (the way
 the Reference does for [the `for` keyword][for]), because we'd need to treat
-the body as a future (e.g. `await { /* loop body */ }`) to intercept `Pending`
+the body as a future (e.g. `async { /* loop body */ }`) to intercept `Pending`
 and call `poll_progress` in the right place, but that's incompatible with
 `return`, `?`, `break`, or `continue` in the body.
 
@@ -1237,7 +1235,6 @@ need a way to come up with input values, which might be possible in some cases
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
-[`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [drive]: https://github.com/oconnor663/drive_async_iterator
