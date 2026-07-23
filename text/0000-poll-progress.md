@@ -973,6 +973,22 @@ The same is true of `poll_next` in the new contract. The "`PollNext::Item`
 rule" and the "`PollNext::Pending` rule" are important and subtle enough that
 it's worth defining a distinct return type to represent them.
 
+### Could we weaken "`poll_progress` is not allowed" to "`poll_progress` is not sufficient"?
+
+By forbidding `poll_progress` after `poll_next` returns `Pending`, we give
+implementations permission to panic in that case. But if not for explicit
+asserts to enforce the rule, the `poll_progress` call itself would probably be
+harmless in practice. Some child futures might get polled before asking for a
+wakeup, but that's fine. Why not allow it?
+
+The main reason not to allow it is that (like the `Future` contract) the
+`AsyncIterator` contract is subtle and not enforced by the compiler. Folks
+writing low-level async iterators for the first time are unlikely to read all
+the docs, and a panic that says "there's a rule you didn't know about" is
+better than confusing control flow bugs. We can't easily do this for the
+`PollNext::Item` rule, and callers who overlook that one will miss wakeups, but
+for the `PollNext::Pending` rule we can do it.
+
 ## Prior art
 [prior-art]: #prior-art
 
