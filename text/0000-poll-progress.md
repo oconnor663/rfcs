@@ -7,8 +7,8 @@
 [summary]: #summary
 
 Add a required `poll_progress` method to the [`AsyncIterator`] trait ([`RFC
-2996`]), and make `for await` loops call this method whenever an `.await` in
-their loop body is `Pending`. Expand the documented `AsyncIterator` contract to
+2996`]), and make `for await` loops call this method when an `.await` in their
+loop body is `Pending`. Expand the documented `AsyncIterator` contract to
 require adapters and consumers to do the same. To emphasize the contract
 requirements of `poll_next`, define a new `PollNext` enum for it to return,
 replacing `Poll<Option<_>>`.
@@ -100,7 +100,7 @@ How does `poll_progress` break this deadlock? There's a lot of async machinery
 involved, most of which already exists today, but here's the rough sequence of
 events ([playground link][poll_progress_playground]):
 
-[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4e197c54d0fc05b5b720b19adee19363
+[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=3fcc75af43cd913a3857c003b611b6b2
 
 1. When `do_work` in the loop body sees that `LOCK` is already taken, it adds
    its `Waker` to the lock's waiters queue before reporting `Pending`.
@@ -415,16 +415,30 @@ We execute the following steps:
    async iterator and evaluates to `()`. Skip the remaining steps.
 6. If the call to `poll_next` returns `PollNext::Item(item)`, then `item` is
    matched against the irrefutable `PATTERN`.
-7. Control proceeds through the loop body, with the bindings from `PATTERN` in
-   scope. If any `.await` expression or `for await` item (i.e. step 3 above, if
-   another `for await` loop is nested within this one) in the body is pending,
-   call `poll_progress` on the async iterator before reporting pending from the
-   surrounding async context.
-8. \[`break`, `continue`, and diverging control flow as usual\]
+7. At the top of the loop body, declare a local `bool` variable (not visible to
+   user code, but let's call it `progress_pending`) and initialize it to
+   `true`. This variable is redeclared in each loop iteration and doesn't
+   logically persist across iterations.
+8. Control proceeds through the loop body, with the bindings from `PATTERN` in
+   scope. When any `.await` expression or `for await` item (i.e. step 3 above,
+   if another `for await` loop is nested within this one) in the body is
+   pending, if `progress_pending` is still `true`, then call `poll_progress` on
+   the async iterator before reporting pending from the surrounding async
+   context.
+9. If `poll_progress` returned `Ready`, set `progress_pending` to `false`.
+10. \[`break`, `continue`, and looping and diverging control flow as usual\]
 
 Note that if `for await` loops are nested, a pending expression in an inner
-loop triggers step 7 above for _all_ the containing loops, starting with the
-innermost.
+loop triggers steps 8 and 9 above for _all_ the containing loops, starting with
+the innermost. Each loop tracks its own `progress_pending` flag reflecting the
+state of its own iterator.
+
+The `progress_pending` flag avoids unnecessary polling after no more progress
+can be made, and the `ForEach` implementations in this RFC's playground
+examples use a similar flag. However, the `AsyncIterator` contract doesn't
+strictly require this sort of tracking. Continuing to call `poll_progress`
+after it returns `Ready` is allowed, and `AsyncIterator` implementations should
+tolerate it, generally with no effect.
 
 ### `async gen fn`
 
@@ -451,7 +465,8 @@ fn`'s implementation of `poll_progress` calls `poll_progress` on that loop's
 iterator. If `for await` loops are nested, there may be multiple such
 iterators, and `poll_progress` gets forwarded to all of them, starting with the
 innermost. If any of the forwarded calls returns `Pending`, then
-`poll_progress` returns `Pending`, otherwise it returns `Ready`.
+`poll_progress` returns `Pending`, otherwise it returns `Ready`. (See the
+unresolved questions section for how `progress_pending` interacts with this.)
 
 Note that when control reaches a `yield`, that by itself does not necessarily
 imply a call to `poll_progress` on any active iterators. If the caller doesn't
@@ -819,7 +834,7 @@ behavior of that function to be *identical* to the `async gen fn` above.
 Consider the following implementation of `Map` ([playground
 link][playground_map]):
 
-[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=a86f7832b3b62f0e993c66f66488e8e0
+[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4c5d8c420500c6318f59db7d874a4dd9
 
 ```rs
 struct Map<Iter, F> {
@@ -865,7 +880,7 @@ while its body is sleeping. If we want `Map` to behave exactly like the `async
 gen fn`, but we have to tolerate a "lazy" `Merge`, then `Map` also needs a
 `next_item_wanted` flag like this ([playground link][playground_map_lazy]):
 
-[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=0efba8c2f159976f07757b9ccd61a405
+[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=34afc0a7a869083bfd0cc60565c514d7
 
 ```rs
 struct Map<Iter, F, T> {
@@ -920,7 +935,7 @@ where
 }
 ```
 
-That's complicated. And any other `AsyncIterator` that runs caller code that
+This is complicated. And any other `AsyncIterator` that runs caller code that
 might have observable side effects -- so maybe not e.g. `Take` or `Skip`, but
 including e.g. `Then`, `Filter`, `TakeWhile`, and `SkipWhile` -- would also be
 _at least_ this complicated. It's not clear whether we'd actually want the
@@ -991,29 +1006,6 @@ find/replace here.
 
 [rename]: https://rust-lang.github.io/rfcs/2996-async-iterator.html#naming
 
-### Will anyone ever look at the `poll_progress` return value?
-
-`poll_progress` returns `Poll::Pending` if it's registered a wakeup, and
-`Poll::Ready(())` otherwise. We treat it as "fused" in the sense that calling
-it again is allowed and _kinda sorta_ guaranteed to return `Ready` again. (We
-don't document that guarantee, but if `poll_progress` spontaneously started
-returning `Pending` again, that would probably mean it failed to register a
-wakeup for itself earlier, and it only got polled again by chance. That's an
-implementation bug?)
-
-In theory we could make it a logic error to call `poll_progress` again after it
-returns `Ready` -- like it is to call `Future::poll` again after it returns
-`Ready` -- but in practice it's hard to imagine an implementation that would
-benefit from that requirement, while it would be a bookkeeping burden on many
-callers. It seems simpler overall to make `poll_progress` idempotent after it
-returns `Ready`.
-
-But that raises the question: If callers don't need to track the previous
-return value, then they probably won't look at it at all. It could save a
-couple lines in a lot of `poll_progress` implementations if it just returned
-nothing. Would any callers care? Does anyone really need to know whether
-`poll_progress` registered a wakeup?
-
 ### How should the `Stream` ecosystem migrate?
 
 It would be nice if the `futures-core` crate could add a blanket `impl<Iter:
@@ -1035,6 +1027,26 @@ benefits of `poll_progress` before migrating. On the other hand, since `Stream`
 callers frequently use the `next` method, the benefit might be small, and it
 could be more confusing than helpful. Feedback needed from the `futures`
 maintainers.
+
+### Should `async gen fn` implementations of `poll_progress` interact with `progress_pending` flags?
+
+As per the reference-level explanation section, `for await` loops will track
+"progress pending" flags to reduce unnecessary calls to `poll_progress` once no
+more progress can be made. In an `async fn` the generated `poll` method will
+handle these flags (if the function has any `for await` loops), and in an
+`async gen fn` the generated `poll_next` method will do the same. The open
+question is, should the generated `poll_progress` method also look at them
+and/or update them? If there's a `yield` in the body of a `for await` loop that
+also contains other `.await` points, the flag will be there in any case. The
+reason not to is that we'd rather not allocate these flags at every level of a
+"chain" of `async gen fn`s that call each other; better to track it "once at
+the top" in the loop where that iterator chain is consumed. It could make sense
+to check and update the flag if it's there, but not to allocate it if the loop
+body contains only `yield` points and no `.await` points?
+
+In any case, `AsyncIterator` implementations should be able to tolerate either
+answer to this question, so we could also leave this implementation detail
+unspecified.
 
 ## Future possibilities
 [future-possibilities]: #future-possibilities
