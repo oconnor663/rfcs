@@ -7,14 +7,18 @@
 [summary]: #summary
 
 Add a required `poll_progress` method to the [`AsyncIterator`] trait ([`RFC
-2996`]), and make `for await` loops call this method when an `.await` in their
-loop body is `Pending`. Expand the documented `AsyncIterator` contract to
-require adapters and consumers to do the same. To emphasize the contract
-requirements of `poll_next`, define a new `PollNext` enum for it to return,
-replacing `Poll<Option<_>>`.
+2996`]). Make `for await` loops ([#118898][for_await]) call `poll_progress`
+while an `.await` in their body is `Pending`. Also, in `async gen` blocks and
+functions ([#117078][gen_blocks]), make `for await` loops call `poll_progress`
+while control is paused at a `yield` in their body. Expand the documented
+`AsyncIterator` contract to require other adapters and consumers to behave the
+same way. To emphasize the contract requirements of `poll_next`, define a new
+`PollNext` enum for it to return, replacing `Poll<Option<_>>`.
 
-[`RFC 2996`]: https://rust-lang.github.io/rfcs/2996-async-iterator.html
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
+[`RFC 2996`]: https://rust-lang.github.io/rfcs/2996-async-iterator.html
+[for_await]: https://github.com/rust-lang/rust/issues/118898
+[gen_blocks]: https://github.com/rust-lang/rust/issues/117078
 
 ## Motivation
 [motivation]: #motivation
@@ -46,13 +50,13 @@ for await _ in my_iter {
 
 When control is at the top, the `for await` loop calls `my_iter.poll_next`
 until it either yields an item with `Ready(Some(_))` or indicates that it's
-done with `Ready(None)`. Once control moves into `do_work`, the loop stops
-driving `my_iter` entirely. That applies necessary "backpressure" to async
-iterators, and it's mostly by design. But it can be a problem if `my_iter`
-wraps multiple concurrent futures or other iterators internally, because
-suspending some of those at arbitrary `.await` points isn't generally correct.
-Here's an example where this causes a deadlock that looks like it should be
-impossible in a straight-line reading of the code:
+done with `Ready(None)`. Once control moves into `do_work`, though, the loop
+stops driving `my_iter` entirely. That applies necessary "backpressure" to
+async iterators, and it's mostly by design. But it can be a problem if
+`my_iter` wraps multiple concurrent futures or other iterators internally,
+because suspending some of those at arbitrary `.await` points isn't generally
+correct. Here's an example where this causes a deadlock that looks like it
+should be impossible in a straight-line reading of the code:
 
 ```rs
 // `do_work` takes a private lock, sleeps briefly, and releases it. A deadlock here shouldn't be possible.
@@ -80,55 +84,53 @@ loop body, the right side of the `Merge` still holds a `do_work` future, which
 is suspended at the point where it has tried to acquire `LOCK` and taken a spot
 in its waiters queue. The call to `do_work` in the body tries to acquire `LOCK`
 again, but the waiter at the front of the queue never wakes up, so it's
-deadlocked.
+deadlocked. This problem often comes up with ["fancy" async iterators like
+`FuturesUnordered` or `buffered` streams][barbara], but the example above uses
+`merge` to emphasize that simple concurrent combinators have the same problem.
 
 [for_each_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt+as+_%2C+once%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_iter+%3D+once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%3B%0A++++my_iter%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
-We usually talk about hangs and deadlocks like these [in the context of "fancy"
-async iterators like `FuturesUnordered` or `buffered` streams][barbara], but
-the example above uses `merge` to emphasize that simpler combinators have the
-same problem.
-
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
-latencies, concurrent async iterators like these need to continuously drive the
-futures they contain. That means that `for await` and other consumers need a
-way to let an iterator make progress, even when they're not ready to take the
-next item. That mechanism is `poll_progress`, a new required method on the
-`AsyncIterator` trait.
+latencies, concurrent async iterators need to continuously drive the futures
+they contain. That means that `for await` and other consumers need a way to let
+iterators make internal progress, even when they're not ready to take the next
+item.
 
-How does `poll_progress` break this deadlock? There's a lot of async machinery
-involved, most of which already exists today, but here's the rough sequence of
-events ([playground link][poll_progress_playground]):
+This is where `poll_progress` comes in. How does it break the deadlock above?
+There's a lot of async machinery involved, most of which already exists today,
+but here's a partial sequence of events ([playground
+link][poll_progress_playground]):
 
 [poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=3fcc75af43cd913a3857c003b611b6b2
 
 1. When `do_work` in the loop body sees that `LOCK` is already taken, it adds
    its `Waker` to the lock's waiters queue before reporting `Pending`.
-2. **New:** Because `main` is in the middle of a `for await` loop, it calls
-   `poll_progress` on the loop's iterator before reporting `Pending` itself.
+2. **New:** Because control in `main` is in the body of a `for await` loop,
+   `main` calls `poll_progress` on the loop's iterator before reporting
+   `Pending` itself.
 3. **New:** `Merge::poll_progress` polls its children, and its second child
-   acquires `LOCK`, registers its `Waker` with the runtime's sleep/timer
-   system, and returns `Pending`. `Merge::poll_progress` then returns `Pending`
-   itself, and `main`'s `poll` function also returns `Pending`.
-4. After 10 ms, the runtime invokes the sleep `Waker` from step 3 and polls
+   finishes acquiring `LOCK`, registers its own `Waker` with the runtime's
+   sleep/timer system, and returns `Pending`. `Merge::poll_progress` then
+   returns `Pending` itself, and `main`'s `poll` function also returns
+   `Pending`.
+4. After 10 ms, the runtime invokes the sleeping `Waker` from step 3 and polls
    `main` again.
-5. `do_work` in the loop body tries the lock again, fails to acquire it, and
+5. `do_work` in the loop body tries to acquire the lock again, fails again, and
    returns `Pending` again.
-6. **New:** As in step 2, `main` calls `Merge::poll_progress`. It polls its
-   children again, and this time the second child drops its lock guard and
-   exits.
+6. **New:** As in step 2, `main` calls `Merge::poll_progress` again. It polls
+   its children, and this time the second child drops its lock guard and yields
+   an item. `Merge` buffers the item, `()` in this case.
 7. Dropping that guard invokes the `Waker` that the body registered in step 1
-   (and reregistered in step 5), which causes the runtime to re-poll `main`
-   immediately.
-8. This time, `do_work` in the loop body successfully acquires `LOCK`, and it
-   eventually runs to completion.
+   (and reregistered in step 5), so the runtime re-polls `main` immediately.
+8. This time `do_work` in the loop body successfully acquires `LOCK` and starts
+   its own sleep. There's no further lock contention, and after a couple
+   iterations the loop finishes, and `main` returns.
 
-At a high level, `poll_progress` lets `for await` and `Merge` -- and every
-other async iterator and consumer -- cooperate to give us a new, strong
-guarantee: Whenever we start running an `async fn`, we'll _keep running it_
-until it's done (or cancelled). That makes reasoning about async locking
-"merely" as difficult as regular locking plus cancellation, as opposed to even
-more difficult than that.
+This is a lot of low-level detail, but at a high level, `poll_progress` gives
+us a new guarantee: Whenever we start running an `async fn`, it will _keep
+running_ until it's done (or cancelled). That makes reasoning about async
+locking "merely" as difficult as regular locking plus cancellation, as opposed
+to even more difficult than that.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
