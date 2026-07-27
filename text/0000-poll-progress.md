@@ -313,8 +313,8 @@ the "`PollNext::Item` rule" about polling again promptly, but note that the
 same rule applies _to the caller_. The caller must poll again, and when they
 do, `inner` will get polled again. However, `Buffer1::poll_progress` doesn't
 impose the same requirements on its caller, so it does need to call
-`inner.poll_progress` in its `Item` branch. (The `inner` iterator is
-["fused"][`Fuse`], so the `Done` state is handled automatically.)
+`inner.poll_progress` in its `Item` branch. (It would also need to handle
+`Done`, but [`Fuse`] takes care of that.)
 
 [`Fuse`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse
 
