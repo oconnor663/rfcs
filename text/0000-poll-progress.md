@@ -101,7 +101,7 @@ There's a lot of async machinery involved, most of which already exists today,
 but here's a partial sequence of events ([playground
 link][poll_progress_playground]):
 
-[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=3fcc75af43cd913a3857c003b611b6b2
+[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4774708bc6f57fc8a65d8af430ce2440
 
 1. When `do_work` in the loop body sees that `LOCK` is already taken, it adds
    its `Waker` to the lock's waiters queue before reporting `Pending`.
