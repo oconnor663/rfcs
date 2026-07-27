@@ -92,13 +92,24 @@ deadlocked. This problem often comes up with ["fancy" async iterators like
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators need to continuously drive the futures
-they contain. That means that `for await` and other consumers need a way to let
-iterators make internal progress, even when they're not ready to take the next
-item.
+they contain. The [general rule with `Future`s][poll_contract] is that we're
+supposed to poll them promptly when they request a wakeup (or drop them). In
+`async fn` terms, that means steadily driving control through the body until it
+returns. The general rule with `AsyncIterator`s needs to be the same, that we
+poll them promptly when they request a wakeup (or drop them). In `async gen fn`
+terms, that means steadily driving control through the body until it _yields an
+item_ or returns. Backpressure is important, but we ought to apply it at yield
+points, not at await points. In the example above, the second child of the
+`Merge` has requested a wakeup, and someone's supposed to poll it. But who? And
+how?
 
-This is where `poll_progress` comes in. How does it break the deadlock above?
-There's a lot of async machinery involved, most of which already exists today,
-but here's a partial sequence of events ([playground
+[poll_contract]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
+
+This is where `poll_progress` comes in. It lets us say, "We're not ready for
+another item, but here's your chance to poll any concurrent `Future`s or
+`AsyncIterator`s you might be responsible for." How does it break the deadlock
+above? There's a lot of async machinery involved, most of which already exists
+today, but here's the sequence of events ([playground
 link][poll_progress_playground]):
 
 [poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4774708bc6f57fc8a65d8af430ce2440
@@ -108,7 +119,7 @@ link][poll_progress_playground]):
 2. **New:** Because control in `main` is in the body of a `for await` loop,
    `main` calls `poll_progress` on the loop's iterator before reporting
    `Pending` itself.
-3. **New:** `Merge::poll_progress` polls its children, and its second child
+3. **New:** `Merge::poll_progress` polls\* its children, and its second child
    finishes acquiring `LOCK`, registers its own `Waker` with the runtime's
    sleep/timer system, and returns `Pending`. `Merge::poll_progress` then
    returns `Pending` itself, and `main`'s `poll` function also returns
@@ -116,21 +127,27 @@ link][poll_progress_playground]):
 4. After 10 ms, the runtime invokes the sleeping `Waker` from step 3 and polls
    `main` again.
 5. `do_work` in the loop body tries to acquire the lock again, fails again, and
-   returns `Pending` again.
+   reports `Pending` again.
 6. **New:** As in step 2, `main` calls `Merge::poll_progress` again. It polls
    its children, and this time the second child drops its lock guard and yields
-   an item. `Merge` buffers the item, `()` in this case.
+   an item, `()` in this case. `Merge` stores the item internally.
 7. Dropping that guard invokes the `Waker` that the body registered in step 1
    (and reregistered in step 5), so the runtime re-polls `main` immediately.
 8. This time `do_work` in the loop body successfully acquires `LOCK` and starts
    its own sleep. There's no further lock contention, and after a couple
    iterations the loop finishes, and `main` returns.
 
-This is a lot of low-level detail, but at a high level, `poll_progress` gives
-us a new guarantee: Whenever we start running an `async fn`, it will _keep
-running_ until it's done (or cancelled). That makes reasoning about async
-locking "merely" as difficult as regular locking plus cancellation, as opposed
-to even more difficult than that.
+That's a lot of low-level detail, but at a high level, `poll_progress` lets us
+make this guarantee: Whenever control enters some async code, it keeps running
+until it returns, yields an item (if it can), or gets cancelled. That makes
+reasoning about async locking "merely" as difficult as regular locking plus
+cancellation, as opposed to even more difficult than that.
+
+> \* Here we're glossing over whether `Merge::poll_progress` should call
+> `poll_next` or `poll_progress` on its children. It could conceivably work
+> either way, but we're going to require `poll_next` for the second child in
+> this case. See "Implementing `AsyncIterator`" below and also the [discussion
+> in the rationales](#why-not-allow-poll_progress-at-any-time).
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -667,7 +684,10 @@ await` and `async gen fn`.
 The fundamental assumption of this RFC is that we need to guarantee smooth
 control flow through async code. Concretely, `Future` and `AsyncIterator`
 implementations should be able to assume that they'll be polled again promptly
-(or dropped) whenever they invoke their `Waker`.
+(or dropped) whenever they invoke their `Waker`. In other words, control should
+resume from an await point ~as soon as what we're waiting on is ready, just
+like control resumes from an ordinary function call ~as soon as the callee
+returns.
 
 One argument for this assumption is an analogy to multithreading. ["Everybody
 knows"](https://jacko.io/snooze.html#threads) that we can't pause or cancel
