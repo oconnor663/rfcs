@@ -806,7 +806,7 @@ for await _ in print_numbers() {
     break;
 }
 
-// prints "NUMBER 0" *twice*
+// prints "NUMBER 0" *twice* (and possibly "NUMBER 1" once, implementation dependent, see below)
 for await _ in print_numbers().merge(print_numbers()) {
     sleep(Duration::from_millis(10)).await;
     break;
@@ -817,12 +817,28 @@ This program does one iteration in each of a couple of `for await` loops. The
 first loop should print "NUMBER 0" once. (That's "obvious", but we'll come back
 to it below.) The second loop should print "NUMBER 0" twice, initially when it
 receives an item, and then again immediately when it starts its sleep. We
-should expect this _regardless of the details of the `AsyncIterator` contract,_
-because our design assumption is that we _never_ pause the flow of control at
-an await point in an async function (or in this case, at a `for await` point in
-an `async gen fn`). The sleep in `slow_numbers` is there to make sure that
-`Merge` calls `poll_next` on both sides; we don't need to ask subtle questions
-about what `Merge` does when one side is immediately ready.
+should expect this much _regardless of the details of the `AsyncIterator`
+contract,_ because our design assumption is that we never pause the flow of
+control at an await point in an async function (or in this case, at a `for
+await` point in an `async gen fn`). The sleep in `slow_numbers` is there to
+make sure that `Merge` calls `poll_next` on both sides; we don't need to ask
+subtle questions about what `Merge` does when one side is immediately ready.
+
+> Aside: Could `Merge` in the second loop continue calling `poll_next` on its
+> left child during the sleep, so that it prints "NUMBER 1" also? That's an
+> implementation choice, since either `poll_next` or `poll_progress` is valid
+> after yielding an item, depending on the behavior we want. The
+> `poll_progress` version, which does _not_ print "NUMBER 1" here, is arguably
+> more natural, for a few reasons: 1) Merging an async iterator with
+> [`empty()`] should have no effect on its behavior, and merging with
+> [`pending()`] should also have no effect until the first iterator is
+> exhausted. 2) The `poll_progress` version has cleaner buffering behavior if
+> we chain several `merge` calls together. It buffers at most one item from
+> each iterator. 3) We can replicate the `poll_next` version by composing the
+> `poll_progress` version with `Buffer1` above.
+
+[`empty()`]: https://docs.rs/futures/latest/futures/stream/fn.empty.html
+[`pending()`]: https://docs.rs/futures/latest/futures/stream/fn.pending.html
 
 With all that in mind, let's think about what would happen if we instead
 implemented `print_numbers` like this, using `Map`:
