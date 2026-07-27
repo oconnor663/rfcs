@@ -172,8 +172,8 @@ wait for input in a way that's compatible with async code.
 [`std::sync::mpsc::Iter`]: https://doc.rust-lang.org/std/sync/mpsc/struct.Iter.html
 
 Async iterators also have a superpower that regular iterators generally do not.
-They can keep working "in the background" while the caller is processing an
-item. For example:
+**They can keep working "in the background" while the caller is processing an
+item.** For example:
 
 ```rs
 for await jpeg in fetch_images() {
@@ -183,11 +183,11 @@ for await jpeg in fetch_images() {
 
 Depending on how it's implemented, `fetch_images` could start downloading the
 next `jpeg` concurrently while control is inside `save_image`. A regular
-iterator could do that with threads, but threads complicate borrowing and
+iterator might do that with threads, but threads complicate borrowing and
 short-circuiting and usually require heap allocation. Async iterators can do
-concurrent background work without threads or allocations, with full support
-for local borrowing and intuitive behavior for `break` and `return` (cancelling
-the background work).
+concurrent background work without threads or allocations, and with full
+support for local borrowing and intuitive behavior for `break` and `return`
+(cancelling the background work).
 
 ### Implementing `AsyncIterator`
 
