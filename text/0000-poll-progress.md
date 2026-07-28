@@ -825,17 +825,18 @@ make sure that `Merge` calls `poll_next` on both sides; we don't need to ask
 subtle questions about what `Merge` does when one side is immediately ready.
 
 > Aside: Could `Merge` in the second loop continue calling `poll_next` on its
-> left child during the sleep, so that it prints "NUMBER 1" also? That's an
-> implementation choice, since either `poll_next` or `poll_progress` is valid
+> _left_ child during the sleep, so that it prints "NUMBER 1" also? That's an
+> implementation choice, and either `poll_next` or `poll_progress` is valid
 > after yielding an item, depending on the behavior we want. The
 > `poll_progress` version, which does _not_ print "NUMBER 1" here, is arguably
-> more natural, for a few reasons: 1) Merging an async iterator with
+> more "natural" for a few reasons: \[1\] Merging an async iterator with
 > [`empty()`] should have no effect on its behavior, and merging with
 > [`pending()`] should also have no effect until the first iterator is
-> exhausted. 2) The `poll_progress` version has cleaner buffering behavior if
-> we chain several `merge` calls together. It buffers at most one item from
-> each iterator. 3) We can replicate the `poll_next` version by composing the
-> `poll_progress` version with `Buffer1` above.
+> exhausted. \[2\] The `poll_progress` version has cleaner buffering behavior
+> if we chain several `merge` calls together, buffering at most one item from
+> each iterator no matter where we put the parentheses. \[3\] We can replicate
+> the `poll_next` version by composing the `poll_progress` version with the
+> `Buffer1` adapter from the "Implementing `AsyncIterator`" section.
 
 [`empty()`]: https://docs.rs/futures/latest/futures/stream/fn.empty.html
 [`pending()`]: https://docs.rs/futures/latest/futures/stream/fn.pending.html
