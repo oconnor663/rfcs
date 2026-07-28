@@ -594,23 +594,26 @@ there are cases where the borrowing and mutability details make that [very
 difficult][mini_redis].
 
 In the difficult cases, we can recreate the `next` method in a
-`poll_progress`-compatible way using a macro. Here's a [working
-proof-of-concept][drive], which takes ownership of an async iterator and
+`poll_progress`-compatible way using a helper function that takes a closure,
+loosely similar to [`std::thread::scope`]. Here's a [working
+proof-of-concept][drive_next], which takes ownership of an async iterator and
 provides a handle with `next` and `with_mut` methods on it. Apart from easing
-migration, the macro also fixes [potential deadlocks in the loop
-above][loop_select_deadlock]. The macro is `no_std`-compatible, but it's also
-quite complicated. We could consider adding something like it to `core`
-someday, but this RFC doesn't propose doing that at first.
+migration, this helper also fixes [potential deadlocks in the loop
+above][loop_select_deadlock]. It's `no_std`-compatible, but it's also somewhat
+complicated. We could consider adding something like it to `core` someday, but
+this RFC doesn't propose doing that at first.
 
+[`std::thread::scope`]: https://doc.rust-lang.org/std/thread/fn.scope.html
+[drive_next]: https://github.com/oconnor663/drive_async_iterator
 [loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_secs%28rand%3A%3Arandom_range%280..5%29%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++%2F%2F+Add+more+jobs+as+they+come+in.%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++%7D%0A%0A++++++++++++%2F%2F+Handle+the+outputs+of+running+jobs.%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
 ### What about the blanket impls?
 
 `AsyncIterator` currently has blanket impls that include [`&mut
-I`][async_iter_blanket_mut] and [`Pin<&mut I>`][async_iter_blanket_pin]. **We
+_`][async_iter_blanket_mut] and [`Pin<&mut _>`][async_iter_blanket_pin]. **We
 should remove these impls,** because driving an `AsyncIterator` by reference is
-deadlock-prone. (We'll keep the boxed ones.) The problem is similar to what we
-just saw with `next` above ([playground link][blanket_deadlock]):
+deadlock-prone. (We'll keep `Box<_>` and `Pin<Box<_>>`.) The problem is similar
+to what we just saw with `next` above ([playground link][blanket_deadlock]):
 
 [async_iter_blanket_mut]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-%26mut+S
 [async_iter_blanket_pin]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-Pin%3CP%3E
@@ -1280,12 +1283,11 @@ must call `send` once at some point after each `Item`, before calling
 `for await coroutine` loop or whatever it might be called to enable concurrency
 between the coroutine and the body -- a wrapper type like `Buffer1` above would
 need a way to come up with input values, which might be possible in some cases
--- but [more complicated macros][drive] would be able to do fun things.
+-- but macros might be able to do interesting things.
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
-[drive]: https://github.com/oconnor663/drive_async_iterator
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
