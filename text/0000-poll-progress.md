@@ -93,15 +93,15 @@ deadlocked. This problem often comes up with ["fancy" async iterators like
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, concurrent async iterators need to continuously drive the futures
 they contain. The [general rule with `Future`s][poll_contract] is that we're
-supposed to poll them promptly when they request a wakeup (or drop them). In
-`async fn` terms, that means steadily driving control through the body until it
-returns. The general rule with `AsyncIterator`s needs to be the same, that we
-poll them promptly when they request a wakeup (or drop them). In `async gen fn`
-terms, that means steadily driving control through the body until it _yields an
-item_ or returns. Backpressure is important, but we ought to apply it at yield
-points, not at await points. In the example above, the second child of the
-`Merge` has requested a wakeup, and someone's supposed to poll it. But who? And
-how?
+supposed to poll them promptly when they request a wakeup. For an `async fn`,
+that means steadily driving control through its body until it returns (or gets
+cancelled). The general rule with `AsyncIterator`s needs to be the same, that
+we poll them promptly when they request a wakeup. For an `async gen fn`, that
+means steadily driving control through its body until it _yields an item_ or
+returns (or gets cancelled). Backpressure is important, but we ought to apply
+it at yield points, not at await points. In the example above, the second child
+of the `Merge` has requested a wakeup, and someone's supposed to poll it. But
+who? And how?
 
 [poll_contract]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
@@ -146,7 +146,7 @@ cancellation, as opposed to even more difficult than that.
 > \* Here we're glossing over whether `Merge::poll_progress` should call
 > `poll_next` or `poll_progress` on its children. It could conceivably work
 > either way, but we're going to require `poll_next` for the second child in
-> this case. See "Implementing `AsyncIterator`" below and also the [discussion
+> this case. See the "`PollNext::Pending` rule" below and also the [discussion
 > in the rationales](#why-not-allow-poll_progress-at-any-time).
 
 ## Guide-level explanation
