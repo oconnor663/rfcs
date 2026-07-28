@@ -119,10 +119,10 @@ link][poll_progress_playground]):
 2. **New:** Because control in `main` is in the body of a `for await` loop,
    `main` calls `poll_progress` on the loop's iterator before reporting
    `Pending` itself.
-3. **New:** `Merge::poll_progress` polls\* its children, and its second child
-   finishes acquiring `LOCK`, registers its own `Waker` with the runtime's
-   sleep/timer system, and returns `Pending`. `Merge::poll_progress` then
-   returns `Pending` itself, and `main`'s `poll` function also returns
+3. **New:** `Merge::poll_progress` polls[^rule] its children, and its second
+   child finishes acquiring `LOCK`, registers its own `Waker` with the
+   runtime's sleep/timer system, and returns `Pending`. `Merge::poll_progress`
+   then returns `Pending` itself, and `main`'s `poll` function also returns
    `Pending`.
 4. After 10 ms, the runtime invokes the sleeping `Waker` from step 3 and polls
    `main` again.
@@ -143,11 +143,12 @@ until it returns, yields an item (if it can), or gets cancelled. That makes
 reasoning about async locking "merely" as difficult as regular locking plus
 cancellation, as opposed to even more difficult than that.
 
-> \* Here we're glossing over whether `Merge::poll_progress` should call
-> `poll_next` or `poll_progress` on its children. It could conceivably work
-> either way, but we're going to require `poll_next` for the second child in
-> this case. See the "`PollNext::Pending` rule" below and also the [discussion
-> in the rationales](#why-not-allow-poll_progress-at-any-time).
+[^rule]: Here we're glossing over whether `Merge::poll_progress` should call
+    `poll_next` or `poll_progress` on its children. It could conceivably work
+    either way, but we're going to require `poll_next` for the second child in
+    this case. See the "`PollNext::Pending` rule" in the [following
+    section](#implementing-asynciterator) and also the [discussion in the
+    rationales](#why-not-allow-poll_progress-at-any-time).
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -806,7 +807,7 @@ for await _ in print_numbers() {
     break;
 }
 
-// prints "NUMBER 0" *twice* (and possibly "NUMBER 1" once, implementation dependent, see below)
+// prints "NUMBER 0" *twice*
 for await _ in print_numbers().merge(print_numbers()) {
     sleep(Duration::from_millis(10)).await;
     break;
@@ -816,27 +817,27 @@ for await _ in print_numbers().merge(print_numbers()) {
 This program does one iteration in each of a couple of `for await` loops. The
 first loop should print "NUMBER 0" once. (That's "obvious", but we'll come back
 to it below.) The second loop should print "NUMBER 0" twice, initially when it
-receives an item, and then again immediately when it starts its sleep. We
-should expect this much _regardless of the details of the `AsyncIterator`
-contract,_ because our design assumption is that we never pause the flow of
-control at an await point in an async function (or in this case, at a `for
-await` point in an `async gen fn`). The sleep in `slow_numbers` is there to
-make sure that `Merge` calls `poll_next` on both sides; we don't need to ask
+receives an item, and then again immediately when it starts its
+sleep.[^print_1] We should expect this much _regardless of the details of the
+`AsyncIterator` contract,_ because our design assumption is that we never pause
+the flow of control at an await point in an async function (or in this case, at
+a `for await` point in an `async gen fn`). The sleep in `slow_numbers` is there
+to make sure that `Merge` calls `poll_next` on both sides; we don't need to ask
 subtle questions about what `Merge` does when one side is immediately ready.
 
-> Aside: Could `Merge` in the second loop continue calling `poll_next` on its
-> _left_ child during the sleep, so that it prints "NUMBER 1" also? That's an
-> implementation choice, and either `poll_next` or `poll_progress` is valid
-> after yielding an item, depending on the behavior we want. The
-> `poll_progress` version, which does _not_ print "NUMBER 1" here, is arguably
-> more "natural" for a few reasons: \[1\] Merging an async iterator with
-> [`empty()`] should have no effect on its behavior, and merging with
-> [`pending()`] should also have no effect until the first iterator is
-> exhausted. \[2\] The `poll_progress` version has cleaner buffering behavior
-> if we chain several `merge` calls together, buffering at most one item from
-> each iterator no matter where we put the parentheses. \[3\] We can replicate
-> the `poll_next` version by composing the `poll_progress` version with the
-> `Buffer1` adapter from the "Implementing `AsyncIterator`" section.
+[^print_1]: Could `Merge` in the second loop continue calling `poll_next` on
+    its _left_ child during the sleep, so that it prints "NUMBER 1" also?
+    That's an implementation choice, and either `poll_next` or `poll_progress`
+    is valid after yielding an item, depending on the behavior we want. The
+    `poll_progress` version, which does _not_ print "NUMBER 1" here, is
+    arguably more "natural" for a few reasons: \[1\] Merging an async iterator
+    with [`empty()`] should have no effect on its behavior, and merging with
+    [`pending()`] should also have no effect until the first iterator is
+    exhausted. \[2\] The `poll_progress` version has cleaner buffering behavior
+    if we chain several `merge` calls together, buffering at most one item from
+    each iterator no matter where we put the parentheses. \[3\] We can
+    replicate the `poll_next` version by composing the `poll_progress` version
+    with the `Buffer1` adapter from the "Implementing `AsyncIterator`" section.
 
 [`empty()`]: https://docs.rs/futures/latest/futures/stream/fn.empty.html
 [`pending()`]: https://docs.rs/futures/latest/futures/stream/fn.pending.html
