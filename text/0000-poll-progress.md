@@ -241,8 +241,6 @@ always start by calling `poll_next`, other consumers (e.g. [`Chain`], on its
 right side) may start with `poll_progress`. Also, cancelling an async iterator
 by dropping it is allowed at any time.
 
-[`Chain`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chain
-
 The first two requirements in the table above are underlined, because they're
 the most surprising. Expanding on those:
 
@@ -1109,20 +1107,50 @@ lints today. Maybe it should. Above we wrote:
 > To satisfy the proposed contract, whatever's driving an `AsyncIterator`
 > generally needs to _own_ it.
 
-The relevant part of the contract there is "poll again when you get a wakeup".
-That's just as important for `Future` as it is for `AsyncIterator`. Should we
-deprecate helpers that can't live up to that responsibility? Does that include
-the blanket `Future` impls on [`&mut F`][future_blanket_mut] and [`Pin<&mut
-F>`][future_blanket_pin]? They can't be removed at this point, but we could
-warn or lint on code that uses them. We could also warn whenever an idle
-`Future` lives across a suspension point. That might not cover e.g. `Vec<impl
-Future>`, but most `Future` containers are themselves futures or async
-iterators, and the corner cases might not matter much in practice.
+The relevant part of the contract is that we should poll again promptly after a
+wakeup, but that's just as important for `Future` as it is for `AsyncIterator`.
+Should we explicitly document that either polling a future promptly or dropping
+it promptly is required after a wakeup? Should we deprecate functions and types
+that can't uphold that rule? Does that include the blanket `Future` impls on
+[`&mut _`][future_blanket_mut] and [`Pin<&mut _>`][future_blanket_pin]? They
+can't be removed at this point, but we could warn or lint on code that uses
+them.
+
+We could also warn whenever an idle `Future` lives across a suspension point.
+That might not cover e.g. `Vec<Box<dyn Future>>`, but most `Future` containers
+are themselves futures or async iterators, and the exceptions might be uncommon
+in practice. Note that unlike an `async fn`,[^alternatively] the body of an
+`async gen fn` isn't required to begin executing promptly (e.g. if it winds up
+on the right side of a [`Chain`]), so any `Future`/`AsyncIterator` argument to
+an `async gen fn` is inherently idle across a suspension point and would
+trigger this warning.
 
 [future_blanket_mut]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
 [future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
-A warning like that could've caught ["Futurelock"][futurelock] before it
+[^alternatively]: Alternatively, we could decide that holding an idle `Future`
+    across a suspension point is ok, as long as that future hasn't ever been
+    polled. In other words, we could say that it's ok to call an `async fn` and
+    hold onto the resulting future for as long as we want before starting to
+    run it. All of the deadlock examples in this RFC happen when an `async fn`
+    takes a lock in its body, so if we don't start running the body, none of
+    those deadlocks will happen. That's potentially viable, but then again,
+    should we be allowed to write an async function like this?
+    ```rs
+    fn do_work() -> impl Future<Output = ()> {
+        static LOCK: Mutex<()> = Mutex::const_new(());
+        // Try to acquire the lock optimistically. If we get it, the returned future takes ownership of the guard.
+        let mut _guard = LOCK.try_lock().ok();
+        async move {
+            if _guard.is_none() {
+                _guard = Some(LOCK.lock().await);
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+    ```
+
+A warning like this could've caught ["Futurelock"][futurelock] before it
 happened. On the other hand, there are [many `select!` loops in the
 wild][mini_redis] that would trigger the same warning, where there's no
 widely-used _owning_ pattern that can easily replace them today. Improving this
@@ -1289,5 +1317,6 @@ need a way to come up with input values, which might be possible in some cases
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
+[`Chain`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chain
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
