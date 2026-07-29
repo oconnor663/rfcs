@@ -1040,14 +1040,6 @@ it, have been discussed for many years. Some points of reference:
 there have been other suggestions, including `poll_proceed` and `poll_bg`.
 We'll probably want to bikeshed this a bit.
 
-### Should we rename `AsyncIterator` to `Stream`?
-
-RFC 2996 includes [a discussion of that question][rename], and this RFC should
-avoid duplicating it. If the consensus on RFC 2996 changes, we can do a
-find/replace here.
-
-[rename]: https://rust-lang.github.io/rfcs/2996-async-iterator.html#naming
-
 ### How should the `Stream` ecosystem migrate?
 
 It would be nice if the `futures-core` crate could add a blanket `impl<Iter:
