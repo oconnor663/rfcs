@@ -1105,7 +1105,7 @@ It's an open question whether `Stream` should add a `poll_progress` method with
 a no-op default implementation. That could help some of the ecosystem get the
 benefits of `poll_progress` before migrating. On the other hand, since `Stream`
 callers frequently use the `next` method, the benefit might be small, and it
-could be more confusing than helpful. Feedback needed from the `futures`
+could be more confusing than helpful. Feedback needed from the `futures-rs`
 maintainers.
 
 ### Should `for await` loops track some sort of "progress pending" flag?
