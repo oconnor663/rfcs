@@ -100,7 +100,7 @@ require the same, that we poll an async iterator promptly when it requests a
 wakeup. At a high level, that guarantees steady control flow through the body
 of an `async gen fn` until it returns, gets cancelled, or _yields an item_.
 Backpressure is important for async iterators, but we should apply it at yield
-points, not at await points.
+points, not at await points.[^yield_points]
 
 [^future_contract]: The docs are unfortunately ambiguous on this point. On the
     one hand they say that "once a task has been woken up, it should attempt to
@@ -110,6 +110,18 @@ points, not at await points.
     lose interest in a future without dropping it. We might want to decide
     and/or clarify that that's not ok. See the [future possibilities
     section](#clarifying-the-future-contract), no pun intended.
+
+[^yield_points]: Sometimes (including in [the original `async`/`await`
+    RFC][rfc2394]) the term "yield point" refers to anywhere we yield _control_
+    of the current thread, including `.await` expressions. But here in the
+    context of `AsyncIterator` and `async gen fn`, we'll use "yield point" to
+    refer specifically to returning an item from `poll_next`, which is what the
+    `yield` keyword does. An "await point" is anywhere `poll` or `poll_next`
+    might report pending, including `.await` expressions and `for await` items.
+    The general term that covers both yield points and await points is
+    "suspension points".
+
+[rfc2394]: https://rust-lang.github.io/rfcs/2394-async_await.html
 
 In the example above, the loop has driven `Merge` to a yield point, and `Merge`
 has driven its first [`Once`] child to a yield point, but its second `Once`
