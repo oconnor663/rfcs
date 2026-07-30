@@ -236,16 +236,20 @@ The core of the `AsyncIterator` trait is the `poll_next` and `poll_progress`
 methods, which look like this:
 
 ```rs
-trait AsyncIterator {
-    type Item;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item>;
-    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()>;
-}
+use core::task::Poll;
 
 enum PollNext<Item> {
     Item(Item),
     Pending,
     Done,
+}
+
+trait AsyncIterator {
+    type Item;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item>;
+
+    fn poll_progress(self: Pin<&mut Self>, cx: &mut Context) -> Poll<()>;
 }
 ```
 
