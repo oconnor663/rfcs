@@ -1154,30 +1154,27 @@ that can't uphold that rule? Does that include the blanket `Future` impls on
 can't be removed at this point, but we could warn or lint on code that uses
 them.
 
-We could also warn whenever an idle `Future` lives across a suspension point.
-That might not cover e.g. `Vec<Box<dyn Future>>`, but most `Future` containers
-are themselves futures or async iterators, and the exceptions might be uncommon
-in practice. Note that unlike an `async fn`,[^alternatively] the body of an
-`async gen fn` isn't required to begin executing promptly (e.g. if it winds up
-on the right side of a [`Chain`]), so any `Future`/`AsyncIterator` argument to
-an `async gen fn` is inherently idle across a suspension point and would
-trigger this warning.
+We could also warn whenever an idle `Future`/`AsyncIterator` lives across a
+suspension point.[^alternatively] That might not cover e.g. `Vec<Box<dyn
+Future>>`, but most `Future` containers are themselves futures or async
+iterators, and there might not be many exceptions in practice. Note that unlike
+an `async fn`, the body of an `async gen fn` isn't required to begin executing
+promptly (e.g. if it winds up on the right side of a [`Chain`]), so any
+`Future`/`AsyncIterator` argument to an `async gen fn` is inherently idle
+across a suspension point and would trigger this warning.
 
 [future_blanket_mut]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
 [future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
-[^alternatively]: Alternatively, we could decide that holding an idle `Future`
-    across a suspension point is ok, as long as that future hasn't ever been
-    polled. In other words, we could say that it's ok to call an `async fn` and
-    hold onto the resulting future for as long as we want before starting to
-    run it. All of the deadlock examples in this RFC happen when an `async fn`
-    takes a lock in its body, so if we don't start running the body, none of
-    those deadlocks will happen. That's potentially viable, but then again,
-    should we be allowed to write an async function like this?
+[^alternatively]: On the other hand, we could decide that holding an idle
+    `Future` across a suspension point is ok, as long as that future hasn't
+    ever been polled. In other words, that it's ok to have a long delay between
+    calling an `async fn` and starting to run it. That could be viable, but
+    then we shouldn't allow async functions like this:
     ```rs
     fn do_work() -> impl Future<Output = ()> {
         static LOCK: Mutex<()> = Mutex::const_new(());
-        // Try to acquire the lock optimistically. If we get it, the returned future takes ownership of the guard.
+        // Try to acquire the lock synchronously. If we get it, the returned future takes ownership of the guard.
         let mut _guard = LOCK.try_lock().ok();
         async move {
             if _guard.is_none() {
