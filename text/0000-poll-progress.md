@@ -20,6 +20,10 @@ same way. To emphasize the new contract requirements of `poll_next`, define a
 [for_await]: https://github.com/rust-lang/rust/issues/118898
 [gen_blocks]: https://github.com/rust-lang/rust/issues/117078
 
+To avoid burying the lede: Effectively deprecating [`StreamExt::next`] will
+probably be the most controversial part of this RFC. See ["What about
+`.next()`?"](#what-about-next) in the Drawbacks section.
+
 ## Motivation
 [motivation]: #motivation
 
@@ -560,7 +564,6 @@ a `next` method,** and we'll need a migration plan for existing callers.
 First, the problem. Here's a version of [the `merge` deadlock
 above][motivation] that `poll_progress` can't fix ([playground link][next1]):
 
-[`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [next1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Aonce%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++_+%3D+my_iter.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rs
@@ -1353,5 +1356,6 @@ need a way to come up with input values, which might be possible in some cases
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`Chain`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chain
+[`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
