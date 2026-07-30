@@ -1195,10 +1195,10 @@ Speaking of which...
 
 ### Concurrency syntax
 
-Today we can only introduce concurrency into async iteration with helpers like
-`Merge` or `Buffer1`, which are written "by hand" using the `AsyncIterator`
-API. We can't write a concurrent iterator using just `for await` and `async gen
-fn` by themselves. But it's interesting to consider how that could change.
+In this RFC we can only introduce concurrency into async iteration with helpers
+like `Merge` or `Buffer1`, which are written "by hand" using the
+`AsyncIterator` API. We can't write a concurrent iterator using `async gen fn`
+by itself. But it's interesting to consider how that could change.
 
 An `async fn` (not a generator) can get concurrency in its body using a `join!`
 macro, which is "almost like syntax". For example:
@@ -1233,7 +1233,7 @@ async gen fn foo() {
 
 What if there was some hypothetical built-in syntax for writing the `async fn`
 above? Maybe it could support error handling and other short-circuiting
-operations (`break`, `continue`) more gracefully.
+operations (`break`, `continue`) more gracefully:
 
 ```rs
 async fn bar() -> anyhow::Result<()> {
@@ -1306,8 +1306,8 @@ for await item in iter {
 } // The value of the loop itself is always `()`.
 ```
 
-Similarly, there are a couple of unused value spots in the likely `gen` and
-`async gen` syntax:
+Similarly, there are a couple of unused value spots in the `gen` and `async
+gen` syntax:
 
 ```rs
 async gen fn foo() -> u32 {
