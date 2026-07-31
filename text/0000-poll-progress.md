@@ -7,10 +7,10 @@
 [summary]: #summary
 
 Add a required `poll_progress` method to the [`AsyncIterator`] trait ([`RFC
-2996`]). Make `for await` loops ([#118898][for_await]) call `poll_progress`
-while an `.await` in their body is `Pending`. Also, in `async gen` blocks and
-functions ([#117078][gen_blocks]), make `for await` loops call `poll_progress`
-while control is paused at a `yield` in their body. Expand the documented
+2996`]), and make `for await` loops ([#118898][for_await]) call `poll_progress`
+while their body is pending. Also, in `async gen` blocks and functions
+([#117078][gen_blocks]), make `for await` loops call `poll_progress` while
+control is paused at a `yield` in their body. Expand the documented
 `AsyncIterator` contract to require other consumers and adapters to behave the
 same way. To emphasize the new contract requirements of `poll_next`, define a
 `PollNext<_>` enum for it to return, replacing `Poll<Option<_>>`.
@@ -613,7 +613,7 @@ for await item in stream { ... }
 
 The `for await` version is more concise and doesn't require pinning, so it's a
 nice improvement where it works. Unfortunately, it doesn't work everywhere.
-Here's an example of a `next` caller that can't easily switch to `for await`
+Here's an example of a `next` caller that can't switch to `for await`
 ([playground link][loop_select]):
 
 [loop_select]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%28rand%3A%3Arandom_range%280..5%29%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++%2F%2F+Add+more+jobs+as+they+come+in.%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++%7D%0A%0A++++++++++++%2F%2F+Handle+the+outputs+of+running+jobs.%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
