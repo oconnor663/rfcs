@@ -95,16 +95,19 @@ concurrent combinators have the same problem.
 [for_each_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt+as+_%2C+once%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+%60my_iter%60+merges+two+child+iterators%2C+each+of+which+wraps+a+%60do_work%60+future.%0A++++let+my_iter+%3D+once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%3B%0A++++my_iter%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++%2F%2F+This+deadlocks%21+One+of+the+%60do_work%60+futures+above+is+holding+%60LOCK%60%2C+but+we%27ve+stopped+polling+it.%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
-latencies, async iterators need to continuously drive any futures or other
-async iterators they contain. [The `Future` contract][poll_contract] requires
+latencies, futures and async iterators need to continuously drive any other
+futures or async iterators they contain. [The `Future` contract][poll] requires
 us to poll a future promptly when it requests a wakeup.[^future_contract] At a
-high level, that guarantees steady control flow through the body of an `async
-fn` until it returns or gets cancelled. The `AsyncIterator` contract should
-require the same, that we poll an async iterator promptly when it requests a
-wakeup. At a high level, that guarantees steady control flow through the body
-of an `async gen fn` until it returns, gets cancelled, or _yields an item_.
-Backpressure is important for async iterators, but we should apply it at yield
-points, not at await points.[^yield_points]
+high level, that guarantees steady control flow through `async` blocks and
+functions until they return or get cancelled. [The `AsyncIterator`
+contract][poll_next] should require the same, that we poll an async iterator
+promptly when it requests a wakeup. At a high level, that would guarantee
+steady control flow through `async gen` blocks and functions until they return,
+get cancelled, or _yield an item_. Backpressure is important for async
+iterators, but we should apply it at yield points, not at await
+points.[^yield_points]
+
+[poll]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
 [^future_contract]: The docs are unfortunately ambiguous on this point. On the
     one hand they say that "once a task has been woken up, it should attempt to
@@ -114,6 +117,8 @@ points, not at await points.[^yield_points]
     lose interest in a future without dropping it. We might want to decide
     and/or clarify that that's not ok. See the [future possibilities
     section](#clarifying-the-future-contract), no pun intended.
+
+[poll_next]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#tymethod.poll_next
 
 [^yield_points]: Sometimes (including in [the original `async`/`await`
     RFC][rfc2394]) the term "yield point" refers to anywhere we yield _control_
@@ -136,7 +141,6 @@ an `.await`, which is the heart of our deadlock. We need `Merge` to re-poll its
 children when that wakeup fires.[^bad_merge] That means we also need `for
 await` to re-poll `Merge`. How?
 
-[poll_contract]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 [`Once`]: https://docs.rs/futures/latest/futures/stream/fn.once.html
 
 [^bad_merge]: Technically another option here is for `Merge` to delay yielding
@@ -175,7 +179,7 @@ the sequence of events ([playground link][poll_progress_playground]):
    reports `Pending` again.
 6. **New:** As in step 2, `main` calls `Merge::poll_progress` again. It polls
    its children, and this time the second child drops its lock guard and yields
-   an item, `()` in this case. `Merge` stores the item internally.
+   `()`. `Merge` stores the item internally.
 7. Dropping that guard invokes the `Waker` that the body registered in step 1
    (and reregistered in step 5), so the runtime re-polls `main` immediately.
 8. This time `do_work` in the loop body successfully acquires `LOCK` and starts
