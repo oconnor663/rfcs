@@ -1172,8 +1172,10 @@ across a suspension point and would trigger this warning.
 [^alternatively]: On the other hand, we could decide that holding an idle
     `Future` across a suspension point is ok, as long as that future hasn't
     ever been polled. In other words, that it's ok to have a long delay between
-    calling an `async fn` and starting to run it. That could be viable, but
-    then we shouldn't allow async functions like this:
+    calling an `async fn` and actually starting to run it. For example, the
+    `async_std` version of `FutureExt` provides a [`delay`] method that does
+    this internally. This isn't inherently prone to any of the deadlocks above,
+    but it could be if we wrote `do_work` in a sync-and-also-async style:
     ```rs
     fn do_work() -> impl Future<Output = ()> {
         static LOCK: Mutex<()> = Mutex::const_new(());
@@ -1187,6 +1189,9 @@ across a suspension point and would trigger this warning.
         }
     }
     ```
+    Should we define a rule that this function is breaking?
+
+[`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
 
 A warning like this could've caught ["Futurelock"][futurelock] before it
 happened. On the other hand, there are [many `select!` loops in the
