@@ -109,14 +109,21 @@ points.[^yield_points]
 
 [poll]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
-[^future_contract]: The docs are unfortunately ambiguous on this point. On the
-    one hand they say that "once a task has been woken up, it should attempt to
-    `poll` the future again". On the other hand they say that "each time the
-    current task is woken up, it should actively re-`poll` pending futures that
-    it _still has an interest in_". The second line implies that it's ok to
-    lose interest in a future without dropping it. We might want to decide
-    and/or clarify that that's not ok. See the [future possibilities
-    section](#clarifying-the-future-contract), no pun intended.
+[^future_contract]: Or does it? The docs are unfortunately ambiguous on this
+    point. On the one hand they say that "once a task has been woken up, it
+    should attempt to `poll` the future again". On the other hand they say that
+    "each time the current task is woken up, it should actively re-`poll`
+    pending futures that it _still has an interest in_". What it means to "lose
+    interest" in a future isn't clear. In general, despite the [importance and
+    controversy][cancelling] of cancellation in async Rust, the words "cancel"
+    and "drop" do not appear in the `Future` docs. Maybe we can reach consensus
+    that ["snoozing"][snooze] futures isn't allowed, but either way, we do need
+    to decide what the contract is and document it. See also the [rationales
+    section](#is-pausing-control-at-await-points-so-terrible-could-we-instead-agree-to-allow-it)
+    and the [future possibilities section](#clarifying-the-future-contract), no
+    pun intended.
+
+[cancelling]: https://www.youtube.com/watch?v=zrv5Cy1R7r4
 
 [poll_next]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#tymethod.poll_next
 
@@ -1082,7 +1089,7 @@ it, have been discussed for many years. Some points of reference:
 - [`futures_concurrency::concurrent_stream::Consumer::progress`](https://docs.rs/futures-concurrency/latest/futures_concurrency/concurrent_stream/trait.Consumer.html#tymethod.progress)
 - ["Future's liveness problem"](https://skepfyr.me/blog/futures-liveness-problem/)
 - ["Futurelock"][futurelock]
-- ["Never snooze a future"](https://jacko.io/snooze.html)
+- ["Never snooze a future"][snooze]
 
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
@@ -1179,7 +1186,8 @@ across a suspension point and would trigger this warning.
     calling an `async fn` and actually starting to run it. For example, the
     `async_std` version of `FutureExt` provides a [`delay`] method that does
     this internally. This isn't inherently prone to any of the deadlocks above,
-    but it could be if we wrote `do_work` in a sync-and-also-async style:
+    but it could be if we wrote `do_work` in a sync-then-async style, like
+    this:
     ```rs
     fn do_work() -> impl Future<Output = ()> {
         static LOCK: Mutex<()> = Mutex::const_new(());
@@ -1193,7 +1201,7 @@ across a suspension point and would trigger this warning.
         }
     }
     ```
-    Should we define a rule that this function is breaking?
+    Should we try to define a rule that this function is breaking?
 
 [`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
 
@@ -1368,3 +1376,4 @@ need a way to come up with input values, which might be possible in some cases
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
+[snooze]: https://jacko.io/snooze.html
