@@ -1064,7 +1064,7 @@ The main reason not to allow it is that (like the `Future` contract) the
 `AsyncIterator` contract is subtle and not enforced by the compiler. Folks
 writing low-level async iterators for the first time are unlikely to read all
 the docs, and a panic that says "there's a rule you didn't know about" is
-better than confusing control flow bugs. We can't easily do this for the
+better than confusing control flow bugs. We can't do this for the
 `PollNext::Item` rule, and callers who overlook that one will miss wakeups, but
 for the `PollNext::Pending` rule we can do it.
 
@@ -1199,9 +1199,9 @@ across a suspension point and would trigger this warning.
 
 A warning like this could've caught ["Futurelock"][futurelock] before it
 happened. On the other hand, there are [many `select!` loops in the
-wild][mini_redis] that would trigger the same warning, where there's no
-widely used _owning_ pattern that can easily replace them today. Improving this
-situation might need to go hand-in-hand with [new
+wild][mini_redis] that would trigger the same warning, where there's no widely
+used _owning_ pattern that can replace them today. Improving this situation
+might need to go hand-in-hand with [new
 macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
 Speaking of which...
 
