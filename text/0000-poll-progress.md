@@ -734,7 +734,7 @@ await` and `async gen fn`.
 The fundamental assumption of this RFC is that we need to guarantee smooth
 control flow through async code. Concretely, `Future` and `AsyncIterator`
 implementations should be able to assume that they'll be polled again promptly
-(or dropped) whenever they invoke their `Waker`. Do we have consensus on this?
+(or dropped) whenever they invoke their `Waker`.
 
 One argument for this assumption is an analogy to multithreading. ["Everybody
 knows"](https://jacko.io/snooze.html#threads) that we can't pause or cancel
