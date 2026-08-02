@@ -569,8 +569,8 @@ The main way users interact with `Stream` in the async ecosystem today is the
 [`StreamExt::next`] method, which returns a future representing the next item
 in the stream. But the `AsyncIterator` contract proposed in this RFC isn't
 compatible with `next`, because the `Next` future is short-lived, and it can't
-keep polling its iterator after it yields an item. **`AsyncIterator` won't have
-a `next` method,** and we'll need a migration plan for existing callers.
+drive the iterator after it's gone. **`AsyncIterator` won't have a `next`
+method,** and we'll need a migration plan for existing callers.
 
 First, the problem. Here's a version of [the `merge` deadlock
 above][motivation] that `poll_progress` can't fix ([playground link][next1]):
