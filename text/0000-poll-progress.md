@@ -653,9 +653,9 @@ In the difficult cases, we can recreate the `next` method in a
 `poll_progress`-compatible way using a helper function that takes a closure,
 loosely similar to [`std::thread::scope`]. Here's a [working
 proof-of-concept][drive_next], which takes ownership of an async iterator and
-provides a handle with `next` and `with_mut` methods on it. Apart from easing
-migration, this helper also fixes [potential deadlocks in the loop
-above][loop_select_deadlock]. It's `no_std`-compatible, but it's also somewhat
+provides a handle with `next` and `with_mut` methods on it. This helper fixes
+both of the deadlocks above plus [another that the `select!` loop is prone
+to][loop_select_deadlock]. It's `no_std`-compatible, but it's also somewhat
 complicated. We could consider adding something like it to `core` someday, but
 this RFC doesn't propose doing that at first.
 
