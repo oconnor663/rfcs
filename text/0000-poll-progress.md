@@ -114,7 +114,7 @@ points.[^yield_points]
     should attempt to `poll` the future again". On the other hand they say that
     "each time the current task is woken up, it should actively re-`poll`
     pending futures that it _still has an interest in_". What it means to "lose
-    interest" in a future isn't clear. In general, despite the [importance and
+    interest" in a future isn't clear. Despite the [importance and
     controversy][cancelling] of cancellation in async Rust, the words "cancel"
     and "drop" do not appear in the `Future` docs. Maybe we can reach consensus
     that ["snoozing"][snooze] futures isn't allowed, but either way, we do need
