@@ -1136,6 +1136,28 @@ In any case, `AsyncIterator` implementations should be able to tolerate either
 answer to this question, so we could also leave this implementation detail
 unspecified.
 
+### Should invalid calls to `poll_progress` always panic?
+
+The `AsyncIterator` contract doesn't require any particular behavior for
+invalid calls to `poll_progress`, but we do need to decide what the
+compiler-generated implementations of `async gen` blocks and functions will do.
+It might be difficult to change this after stabilization.
+
+As described in the [reference-level explanation](#async-gen-fn) and in the
+[rationales](#could-we-weaken-poll_progress-is-not-allowed-to-poll_progress-is-not-sufficient),
+we'd like invalid calls to `poll_progress` to panic. On the other hand, for
+`async gen` functions that don't loop over any other async iterators,
+`poll_progress` might not have any real work to do besides these panics. In
+that (common?) case, it would be nice if `poll_progress` was a no-op, so that
+the optimizer could elide it entirely. Maybe trivial `poll_progress`
+implementations should omit these panics? Or maybe `poll_progress` should only
+panic in debug mode, like integer overflows? One factor here could be that it's
+hard for a generic `AsyncIterator` impl (like the two-line
+`Then::poll_progress` example [in the rationales
+section](#why-not-allow-poll_progress-at-any-time)) to know whether its child
+iterator's `poll_progress` function is trivial, so a debug-mode-only approach
+might better for consistency.
+
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
