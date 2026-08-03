@@ -1227,11 +1227,11 @@ across a suspension point and would trigger this warning.
 
 [`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
 
-A warning like this could've caught ["Futurelock"][futurelock] before it
-happened. On the other hand, there are [many `select!` loops in the
-wild][mini_redis] that would trigger the same warning, where there's no widely
-used _owning_ pattern that can replace them today. Improving this situation
-might need to go hand-in-hand with [new
+Either of those warnings could've caught ["Futurelock"][futurelock] before it
+happened. On the other hand, there are also many `select!` loops in the wild
+that would trigger them today, where it's not clear what we can do instead.
+Task spawning is a common alternative, but it [isn't always an
+option][mini_redis]. Improving this situation might require [new
 macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
 Speaking of which...
 
