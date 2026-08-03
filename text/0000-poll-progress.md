@@ -318,7 +318,7 @@ the most surprising. Expanding on those:
   concurrent combinators that "merge" multiple async iterators together. After
   a child iterator yields an item, those combinators should keep driving their
   other children with `poll_next` internally until each of them has yielded an
-  item. That ensures the smooth flow of control through chains of adapters and
+  item. This gives us consistent control flow through chains of adapters and
   combinators, and it means that most async iterators don't need to allocate
   buffer space for an item. The rationale section [discusses this rule
   further](#why-not-allow-poll_progress-at-any-time).
@@ -517,10 +517,11 @@ initial state where control hasn't yet entered the body, and to the states
 where control is suspended at a `yield` expression. Importantly, in the states
 where control is suspended at a pending `.await` or `for await`, we know that
 the previous call to `poll_next` returned `Pending`, so calling `poll_progress`
-is not valid. (The implementation panics if it receives such a call, though
-that isn't required by the contract.) This gives us an important
-simplification: **Only `poll_next` advances control through the body of an
-`async gen fn`.**
+is not valid. (The implementation should probably panic if it receives such a
+call, though that isn't required by the contract. See the [unresolved questions
+section](#should-invalid-calls-to-poll_progress-always-panic).) This gives us
+an important simplification: **Only `poll_next` advances control through the
+body of an `async gen fn`.**
 
 In contrast, `poll_progress` has a limited responsibility: If control is
 suspended at a `yield` in the body of a `for await` loop, then the `async gen
@@ -552,8 +553,8 @@ async gen fn foo() {
             // While control is suspended at this `yield`, `foo`'s `poll_progress` function calls
             // `poll_progress` on the `baz` and `bar` async iterators, and it reports pending if either of
             // those calls is pending. Note that reaching this `yield` does *not* automatically call
-            // `poll_progress` on `baz` or `bar`. That call only comes if/when the caller encounters a pending
-            // await in their own loop and calls `poll_progress` on `foo`.
+            // `poll_progress` on `baz` or `bar`. Those calls only come if/when the caller encounters a
+            // pending await in their own loop and calls `poll_progress` on `foo`.
             yield;
         }
     }
@@ -1097,8 +1098,11 @@ it, have been discussed for many years. Some points of reference:
 ### What other names should we consider for `poll_progress`?
 
 `poll_progress` is the most common name folks use to refer to this feature, but
-there have been other suggestions, including `poll_proceed` and `poll_bg`.
-We'll probably want to bikeshed this a bit.
+there have been other suggestions, including [`poll_bg`] and [`poll_pending`].
+We might want to bikeshed this a bit.
+
+[`poll_bg`]: https://www.reddit.com/r/rust/comments/18czxf1/comment/kchm9c9/
+[`poll_pending`]: https://hackmd.io/wy0xQU8eRyuwhki5zkpoCg
 
 ### How should the `Stream` ecosystem migrate?
 
@@ -1145,18 +1149,18 @@ It might be difficult to change this after stabilization.
 
 As described in the [reference-level explanation](#async-gen-fn) and in the
 [rationales](#could-we-weaken-poll_progress-is-not-allowed-to-poll_progress-is-not-sufficient),
-we'd like invalid calls to `poll_progress` to panic. On the other hand, for
-`async gen` functions that don't loop over any other async iterators,
-`poll_progress` might not have any real work to do besides these panics. In
-that (common?) case, it would be nice if `poll_progress` was a no-op, so that
-the optimizer could elide it entirely. Maybe trivial `poll_progress`
-implementations should omit these panics? Or maybe `poll_progress` should only
-panic in debug mode, like integer overflows? One factor here could be that it's
-hard for a generic `AsyncIterator` impl (like the two-line
+we'd like invalid calls to these `poll_progress` functions to panic. On the
+other hand, for `async gen` functions that don't loop over any other async
+iterators, `poll_progress` might not have any real work to do besides these
+panics. In that (common?) case, it would be nice if `poll_progress` was a
+no-op, so that the optimizer could elide it entirely. Maybe trivial
+`poll_progress` implementations should omit these panics? Or maybe
+`poll_progress` should only panic in debug mode, like integer overflows? One
+factor here could be that a generic `AsyncIterator` impl (like the two-line
 `Then::poll_progress` example [in the rationales
-section](#why-not-allow-poll_progress-at-any-time)) to know whether its child
-iterator's `poll_progress` function is trivial, so a debug-mode-only approach
-might better for consistency.
+section](#why-not-allow-poll_progress-at-any-time)) can't know whether its
+child iterator's `poll_progress` function is trivial, so a debug-mode-only
+approach might better for consistency.
 
 ## Future possibilities
 [future-possibilities]: #future-possibilities
