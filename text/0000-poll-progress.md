@@ -92,7 +92,7 @@ up with ["fancy" async iterators like `FuturesUnordered` or `buffered`
 streams][barbara], but the example above uses `merge` to emphasize that simple
 concurrent combinators have the same problem.
 
-[for_each_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt+as+_%2C+once%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+%60my_iter%60+merges+two+child+iterators%2C+each+of+which+wraps+a+%60do_work%60+future.%0A++++let+my_iter+%3D+once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%3B%0A++++my_iter%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++%2F%2F+This+deadlocks%21+One+of+the+%60do_work%60+futures+above+is+holding+%60LOCK%60%2C+but+we%27ve+stopped+polling+it.%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
+[for_each_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt+as+_%2C+once%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+%60my_iter%60+merges+two+child+iterators%2C+each+of+which+wraps+a%0A++++%2F%2F+%60do_work%60+future.%0A++++let+my_iter+%3D+once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%3B%0A++++my_iter%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++%2F%2F+This+deadlocks%21+One+of+the+%60do_work%60+futures+above%0A++++++++++++%2F%2F+is+holding+%60LOCK%60%2C+but+we%27ve+stopped+polling+it.%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++do_work%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, futures and async iterators need to continuously drive any other
@@ -186,7 +186,7 @@ the sequence of events ([playground link][poll_progress_playground]):
    reports `Pending` again.
 6. **New:** As in step 2, `main` calls `Merge::poll_progress` again. It polls
    its children, and this time the second child drops its lock guard and yields
-   `()`. `Merge` stores the item internally.
+   `()`. `Merge` stores that item internally.
 7. Dropping that guard invokes the `Waker` that the body registered in step 1
    (and reregistered in step 5), so the runtime re-polls `main` immediately.
 8. This time `do_work` in the loop body successfully acquires `LOCK` and starts
@@ -200,7 +200,7 @@ the sequence of events ([playground link][poll_progress_playground]):
     section](#implementing-asynciterator) and also the [discussion in the
     rationales](#why-not-allow-poll_progress-at-any-time).
 
-That's a lot of low-level detail, but at a high level, `poll_progress` repairs
+That's a lot of low-level detail, but at a high level `poll_progress` repairs
 the steady control flow guarantee for async functions. That makes reasoning
 about async locking "merely" as difficult as regular locking plus cancellation,
 instead of even more difficult than that.
@@ -242,8 +242,8 @@ next `jpeg` concurrently while control is inside `save_image`. A regular
 iterator might do that with threads, but threads complicate borrowing and
 short-circuiting and usually require heap allocation. Async iterators can do
 concurrent background work without threads or allocations, and with full
-support for local borrowing and intuitive behavior for `break` and `return`
-(cancelling the background work).
+support for local borrowing and straightforward behavior for `break` and
+`return` (cancelling the background work).
 
 ### Implementing `AsyncIterator`
 
@@ -662,7 +662,7 @@ this RFC doesn't propose doing that at first.
 
 [`std::thread::scope`]: https://doc.rust-lang.org/std/thread/fn.scope.html
 [drive_next]: https://github.com/oconnor663/drive_async_iterator
-[loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_secs%28rand%3A%3Arandom_range%280..5%29%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++%2F%2F+Add+more+jobs+as+they+come+in.%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++%7D%0A%0A++++++++++++%2F%2F+Handle+the+outputs+of+running+jobs.%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
+[loop_select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AStreamExt%3B%0Ause+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%28rand%3A%3Arandom_range%280..5%29%29%29.await%3B%0A%7D%0A%0Aasync+fn+more_work%28%29+-%3E+impl+Future%3COutput+%3D+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_millis%281%29%29.await%3B%0A++++work%28%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++%2F%2F+Add+more+jobs+as+they+come+in.%0A++++++++++++job+%3D+more_work%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22got+a+job%22%29%3B%0A++++++++++++++++futures.push%28job%29%3B%0A++++++++++++%7D%0A%0A++++++++++++%2F%2F+Handle+the+outputs+of+running+jobs.%0A++++++++++++Some%28_%29+%3D+futures.next%28%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22finished+a+job%22%29%3B%0A++++++++++++++++work%28%29.await%3B+%2F%2F+Deadlock%21%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
 If we use a helper function like this inside an `async gen fn`, we won't be
 able to `yield` in the closure body. The "Future possibilities" section
@@ -679,7 +679,7 @@ to what we just saw with `next` above ([playground link][blanket_deadlock]):
 
 [async_iter_blanket_mut]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-%26mut+S
 [async_iter_blanket_pin]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#impl-AsyncIterator-for-Pin%3CP%3E
-[blanket_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt%2C+once%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++%2F%2F+Replace+this+loop+with+a+%60Stream%60+equivalent+that+runs+today.%0A++++%2F%2F+for+await+_+in+my_iter+%7B%0A++++%2F%2F+++++break%3B%0A++++%2F%2F+%7D%0A++++StreamExt%3A%3Atake%28my_iter%2C+1%29.for_each%28async+%7C_%7C+%7B%7D%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[blanket_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7BStreamExt%2C+once%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_iter+%3D+pin%21%28once%28do_work%28%29%29.merge%28once%28do_work%28%29%29%29%29%3B%0A++++%2F%2F+The+following+take%2Ffor_each+chain+is+equivalent+to+this+loop%3A%0A++++%2F%2F%0A++++%2F%2F+for+await+_+in+my_iter+%7B%0A++++%2F%2F+++++break%3B%0A++++%2F%2F+%7D%0A++++StreamExt%3A%3Atake%28my_iter%2C+1%29.for_each%28async+%7C_%7C+%7B%7D%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rs
 let mut my_iter = pin!(once(do_work()).merge(once(do_work())));
@@ -1160,7 +1160,7 @@ factor here could be that a generic `AsyncIterator` impl (like the two-line
 `Then::poll_progress` example [in the rationales
 section](#why-not-allow-poll_progress-at-any-time)) can't know whether its
 child iterator's `poll_progress` function is trivial, so a debug-mode-only
-approach might better for consistency.
+approach might be better for consistency.
 
 ## Future possibilities
 [future-possibilities]: #future-possibilities
@@ -1194,7 +1194,7 @@ that can't uphold that rule? Does that include the blanket `Future` impls on
 can't be removed at this point, but we could warn or lint on code that uses
 them.
 
-We could also warn whenever an idle `Future`/`AsyncIterator` lives across a
+We could also warn whenever an idle `Future`/`AsyncIterator` crosses a
 suspension point.[^alternatively] That might not cover e.g. `Vec<Box<dyn
 Future>>`, but most `Future` containers are themselves futures or async
 iterators, and there might not be many exceptions in practice. Note that unlike
@@ -1233,8 +1233,8 @@ across a suspension point and would trigger this warning.
 
 Either of those warnings could've caught ["Futurelock"][futurelock] before it
 happened. On the other hand, there are also many `select!` loops in the wild
-that would trigger them today, where it's not clear what we can do instead.
-Task spawning is a common alternative, but it [isn't always an
+that would trigger them today, where it isn't clear what we should be doing
+instead. Task spawning is a common alternative, but it [isn't always an
 option][mini_redis]. Improving this situation might require [new
 macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
 Speaking of which...
