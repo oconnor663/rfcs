@@ -168,7 +168,7 @@ iterators you're responsible for." How does it break our deadlock? There's a
 lot of async machinery involved, most of which already exists today, but here's
 the sequence of events ([playground link][poll_progress_playground]):
 
-[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4774708bc6f57fc8a65d8af430ce2440
+[poll_progress_playground]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=7f761d927209833bc25c3cb1564236ba
 
 1. When `do_work` in the loop body sees that `LOCK` is already taken, it adds
    its `Waker` to the lock's waiters queue before reporting `Pending`.
@@ -921,7 +921,7 @@ behavior of that function to be *identical* to the `async gen fn` above.
 Consider the following implementation of `Map` ([playground
 link][playground_map]):
 
-[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=4c5d8c420500c6318f59db7d874a4dd9
+[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=21c0e33940016f9b83f6c86ed5209b2d
 
 ```rs
 struct Map<Iter, F> {
@@ -937,7 +937,7 @@ where
 {
     type Item = T;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Self::Item> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<T> {
         let this = self.project();
         this.iter.poll_next(cx).map(this.f) // `PollNext::map` is analogous to `Poll::map`.
     }
@@ -967,7 +967,7 @@ while its body is sleeping. If we want `Map` to behave exactly like the `async
 gen fn`, but we have to tolerate a "lazy" `Merge`, then `Map` also needs a
 `next_item_wanted` flag like this ([playground link][playground_map_lazy]):
 
-[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=34afc0a7a869083bfd0cc60565c514d7
+[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=936ab756fe85867c63118188a3854307
 
 ```rs
 struct Map<Iter, F, T> {
