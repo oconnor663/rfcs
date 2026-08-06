@@ -1205,6 +1205,10 @@ promptly (e.g. if it winds up on the right side of a [`Chain`]), so any
 `Future`/`AsyncIterator` argument to an `async gen fn` is inherently idle
 across a suspension point and would trigger this warning.
 
+> TODO: This warning would trigger on the hypothetical `async gen fn merge`
+> example below. That seems not ideal. Should we weaken the requirement that
+> futures start executing immediately?
+
 [future_blanket_mut]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
 [future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
