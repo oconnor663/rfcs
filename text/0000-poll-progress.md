@@ -489,7 +489,8 @@ We execute the following steps:
    `PollNext::Pending`), suspending its state so that, when it's re-polled,
    execution returns to step 3.
 5. If the call to `poll_next` returns `PollNext::Done`, then the loop drops the
-   async iterator and evaluates to `()`. Skip the remaining steps.
+   async iterator and evaluates to `()`. Drop the iterator and skip the
+   remaining steps.
 6. If the call to `poll_next` returns `PollNext::Item(item)`, then `item` is
    matched against the irrefutable `PATTERN`.
 7. Control proceeds through the loop body, with the bindings from `PATTERN` in
@@ -497,7 +498,8 @@ We execute the following steps:
    if another `for await` loop is nested within this one) in the body is
    pending, call `poll_progress` on the async iterator before reporting pending
    from the surrounding async context.
-8. \[`break`, `continue`, and looping and diverging control flow as usual\]
+8. \[`break`, `continue`, and looping and diverging control flow as usual,
+   dropping the iterator on exit\]
 
 Note that if `for await` loops are nested, a pending expression in an inner
 loop triggers step 7 above for _all_ the containing loops, starting with the
