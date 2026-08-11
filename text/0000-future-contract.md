@@ -99,9 +99,14 @@ deadlock like this?
 
 ### `Future` docs
 
-A future represents an asynchronous computation and also the value it might
+> The focus of this RFC is the docs changes in the subsection "The `poll`
+> method" below. The following is a general intro that might lead into that
+> section, both to avoid presenting it in a vacuum, and to make this whole RFC
+> slightly more accessible to folks who haven't written a ton of async Rust.
+
+A future represents an asynchronous computation and the value it might
 eventually return. The most common way to create a future is to call an `async
-fn`. Often we `.await` futures without giving them a name, like this:
+fn`. Often we `.await` a future without giving it a name, like this:
 
 ```rust
 async fn double(x: u32) -> u32 {
@@ -112,7 +117,7 @@ assert_eq!(double(42).await, 84);
 ```
 
 If we break that last line into three lines, we can see some of the temporary
-values:
+values involved:
 
 ```rust
 let my_future = double(42);
@@ -120,9 +125,9 @@ let my_output = my_future.await;
 assert_eq!(my_output, 84);
 ```
 
-Intuitively is `u32` is the "return value" of `double`, but what we see here is
-that the expression `double()` actually evaluates to a future, and we get a
-`u32` when we `.await` that future. So we can look at `double` in two different
+Intuitively `u32` is the "return type" of `double`, but what we're seeing here
+is that the expression `double()` actually evaluates to a future, and we get a
+`u32` when we `.await` that future. We can look at `double` in two different
 ways: it's an `async fn` that returns `u32`, but it's also a regular function
 that returns a future _whose output_ is a `u32`. That's what it means to be an
 `async fn`.
@@ -151,10 +156,12 @@ assert_eq!(double(42).await, 84);
 
 Here the `foo` function returns a `Foo` future, so it behaves like an `async
 fn`, and we can `.await` it the same way. What makes `Foo` a future is that it
-implements the `Future` trait, and the core of the `Future` trait is the `poll`
+implements the `Future` trait. And the core of the `Future` trait is the `poll`
 method.
 
 #### The `poll` method
+
+> As mentioned above, here's where the important changes in this RFC begin.
 
 ...
 
