@@ -6,18 +6,85 @@
 ## Summary
 [summary]: #summary
 
-One paragraph explanation of the feature.
+Clarify and document the contract requirements of the `Future::poll` method, in
+particular that a future should be polled or dropped promptly when it requests
+a wakeup. More generally, document what it means to cancel a future.
+
+There are widely used patterns in async Rust that violate that "poll promptly
+requirement", including `select!`-by-reference and `StreamExt::next`. This RFC
+identifies several of them, but it avoids endorsing specific changes beyond the
+`Future` docs. Some will need follow-up RFCs of their own and/or time to
+experiment with alternatives in the ecosystem.
 
 ## Motivation
 [motivation]: #motivation
 
-Any changes to Rust should focus on solving a problem that users of Rust are having.
-This section should explain this problem in detail, including necessary background.
+Consider this contrived deadlock example:
 
-It should also contain several specific use cases where this feature can help a user, and explain how it helps.
-This can then be used to guide the design of the feature.
+```rust
+async fn foo() {
+    static LOCK: Mutex<()> = Mutex::const_new(());
+    let _guard = LOCK.lock().await;
+    sleep(Duration::from_millis(10)).await;
+}
 
-This section is one of the most important sections of any RFC, and can be lengthy.
+#[tokio::main]
+async fn main() {
+    let future1 = pin!(foo());
+    _ = poll!(future1);
+    foo().await; // Deadlock!
+}
+```
+
+`poll!` puts `future1` in the state where it's acquired `LOCK` and started
+sleeping, and then the second call to `foo` starts waiting for `LOCK`. We don't
+poll `future1` again or drop it while we're waiting, so this is a deadlock.
+
+The `poll!` macro isn't common in practice, and a more realistic version of
+this example would use `select!`. However, to emphasize that this problem is
+broader than `select!`, let's use `timeout` instead:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let mut future1 = pin!(foo());
+    _ = timeout(Duration::from_millis(1), &mut future1).await;
+    foo().await; // Deadlock!
+}
+```
+
+This still isn't very realistic, because nothing is forcing us to use `pin!`
+here. (And passing `future1` to `timeout` by value would fix the deadlock,
+because then we'd drop it when the timeout expires.) Usually we only need
+`pin!` when we're driving a future in a loop. Let's put the loop in, and while
+we're add it we'll add a couple layers of abstraction around `foo`:
+
+```rust
+async fn bar() {
+    foo().await;
+}
+
+async fn baz() {
+    foo().await;
+}
+
+#[tokio::main]
+async fn main() {
+    // While `bar` is running, call `baz` every 5 ms.
+    let mut bar_future = pin!(bar());
+    let tick = Duration::from_millis(5);
+    while timeout(tick, &mut bar_future).await.is_err() {
+        baz().await; // Deadlock!
+    }
+}
+```
+
+Now we're starting to see how these things happen in practice. To complete the
+illusion, imagine that `foo`, `bar`, `baz`, and `main` are all defined in
+different crates. The lock is private to `foo`, but the `main` crate doesn't
+depend on `foo`. The author of `main` might never even have heard of `foo`, to
+say nothing of its private implementation details. So, who's "at fault" for a
+deadlock like this?
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
