@@ -97,16 +97,66 @@ deadlock like this?
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-Explain the proposal as if it was already included in the language and you were teaching it to another Rust programmer. That generally means:
+### `Future` docs
 
-- Introducing new named concepts.
-- Explaining the feature largely in terms of examples.
-- Explaining how Rust programmers should *think* about the feature, and how it should impact the way they use Rust. It should explain the impact as concretely as possible.
-- If applicable, provide sample error messages, deprecation warnings, or migration guidance.
-- If applicable, describe the differences between teaching this to existing Rust programmers and new Rust programmers.
-- Discuss how this impacts the ability to read, understand, and maintain Rust code. Code is read and modified far more often than written; will the proposed feature make code easier to maintain?
+A future represents an asynchronous computation and also the value it might
+eventually return. The most common way to create a future is to call an `async
+fn`. Often we `.await` futures without giving them a name, like this:
 
-For implementation-oriented RFCs (e.g. for compiler internals), this section should focus on how compiler contributors should think about the change, and give examples of its concrete impact. For policy RFCs, this section should provide an example-driven introduction to the policy, and explain its impact in concrete terms.
+```rust
+async fn double(x: u32) -> u32 {
+    2 * x
+}
+
+assert_eq!(double(42).await, 84);
+```
+
+If we break that last line into three lines, we can see some of the temporary
+values:
+
+```rust
+let my_future = double(42);
+let my_output = my_future.await;
+assert_eq!(my_output, 84);
+```
+
+Intuitively is `u32` is the "return value" of `double`, but what we see here is
+that the expression `double()` actually evaluates to a future, and we get a
+`u32` when we `.await` that future. So we can look at `double` in two different
+ways: it's an `async fn` that returns `u32`, but it's also a regular function
+that returns a future _whose output_ is a `u32`. That's what it means to be an
+`async fn`.
+
+Normally the compiler generates the "regular function that returns a future"
+part for us, and we don't need to write it out ourselves. But we can write it
+if we like. The following `fn double` is equivalent to `async fn double` above:
+
+```rust
+struct Foo(u32);
+
+impl Future for Foo {
+    type Output = u32;
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context) -> Poll<u32> {
+        Poll::Ready(self.0 * 2)
+    }
+}
+
+fn foo(x: u32) -> Foo {
+    Foo(x)
+}
+
+assert_eq!(double(42).await, 84);
+```
+
+Here the `foo` function returns a `Foo` future, so it behaves like an `async
+fn`, and we can `.await` it the same way. What makes `Foo` a future is that it
+implements the `Future` trait, and the core of the `Future` trait is the `poll`
+method.
+
+#### The `poll` method
+
+...
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
