@@ -98,11 +98,11 @@ fault" for a deadlock like this?
 
 ### `Future` docs
 
-> The focus of this RFC is the new/clarified polling responsibility in the
-> subsection "The `poll` method" below. The following is an expanded general
-> intro to lead into that section, both to avoid presenting it in a vacuum, and
-> to make the RFC slightly more accessible to folks who haven't written a ton
-> of async Rust.
+> The focus of this RFC is the new/clarified polling responsibility, which are
+> bolded in the subsection "The `poll` method" below. The following is an
+> expanded general intro to lead into that section, both to avoid presenting it
+> in a vacuum, and to make the RFC slightly more accessible to folks who
+> haven't written a ton of async Rust.
 
 A future represents an asynchronous computation and the value it might
 eventually return. The most common way to create a future is to call an `async
@@ -126,10 +126,10 @@ assert_eq!(my_output, 84);
 ```
 
 Intuitively, `u32` is the "return type" of `double`, but here we see that the
-expression `double()` actually evaluates to a future, and we get the `u32` when
+expression `double()` actually evaluates to a future, and we get a `u32` when
 we `.await` that future. We can look at `double` in two different ways: it's an
 `async fn` that returns `u32`, but it's also a regular function that returns a
-future whose output is a `u32`. That's what it means to be an `async fn`.
+future whose output is `u32`. That's what it means to be an `async fn`.
 
 Normally the compiler generates the "regular function that returns a future"
 for us, and we don't need to write it ourselves. But we can write it if we
@@ -187,24 +187,29 @@ block or function, these responsibilities mean that `poll` will:
 3. If control reaches an `.await` of an inner future, and polling that inner
    future returns `Pending`, stop executing the body and return `Pending`. Rely
    on the inner future to invoke the `Waker` when it should be polled again.
-   (Some low-level futures use operating system APIs like [`epoll`] to
-   implement wakeups, but `async fn` futures almost always delegate this
-   responsibility.)
+   Some low-level futures use threads or operating system APIs like [`epoll`]
+   to implement wakeups, but `async fn` futures almost always delegate this
+   responsibility.
 
 [`epoll`]: https://en.wikipedia.org/wiki/Epoll
 
-The `poll` method also imposes three responsibilities on its caller:
+The `poll` method also imposes two responsibilities on its caller:
 
 1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
-   should drop the future promptly. Further calls to `poll` may panic or
+   should **drop the future promptly**. Further calls to `poll` may panic or
    otherwise misbehave (within the bounds of safe code).
 
 2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
    that call is later invoked, and the future hasn't been dropped in the
-   meantime, the caller should `poll` again promptly.
+   meantime, the caller should **`poll` again promptly.**
 
-3. If `poll` panics without terminating the whole process, the caller should
-   not call `poll` again and should drop the future promptly.
+> We could consider a third responsibility here regarding panicking: "If `poll`
+> panics without terminating the whole process, the caller should not call
+> `poll` again and should drop the future promptly." On the other hand, futures
+> that use `catch_unwind` and therefore need to worry about this are extremely
+> rare, and this isn't really a pressing concern for the ecosystem. We could
+> also consider folding this into the first case above, since the requirement
+> is the same.
 
 Here's an example of a `Future` implementation that fails that second
 requirement, a.k.a. the "`Poll::Pending` rule":
@@ -231,13 +236,13 @@ second time when those wakeups trigger, failing to poll `Fut` promptly. This
 mistake tends to cause hangs and deadlocks, and `CoinFlip` would be "at fault"
 for those bugs. There are three ways we can fix it:
 
-1. Return `Ready` in the `else` branch, which requires the caller to drop
-   `CoinFlip` promptly. This would also mean changing the `Output` type to
-   `Option<_>`, or maybe adding a `Default` bound.
-2. Drop the inner `Fut` in the `else` branch before returning `Pending`. We'd
-   need to make `self.0` an `Option<_>` or similar.
-3. Panic in the `else` branch. This probably isn't what users want, but it's
-   technically correct, the best kind of correct.
+- Return `Ready` in the `else` branch, which requires the caller to drop
+  `CoinFlip` promptly. This would also mean changing the `Output` type to
+  `Option<_>`, or maybe adding a `Default` bound.
+- Drop the inner `Fut` in the `else` branch before returning `Pending`. We'd
+  need to make `self.0` an `Option<_>` or similar.
+- Panic in the `else` branch. This probably isn't what users want, but it's
+  technically correct, the best kind of correct.
 
 #### Cancellation
 
