@@ -35,7 +35,6 @@ async fn foo() {
 async fn main() {
     let mut future1 = pin!(foo());
     _ = poll!(&mut future1);
-    println!("We make it here...");
     foo().await; // Deadlock!
 }
 ```
@@ -91,22 +90,23 @@ async fn main() {
 Now we can see how these things happen in practice. To complete the illusion,
 imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
 crates. The lock is private to `foo`, but the `main` crate doesn't depend on
-`foo`, and the author of `main` might never even have heard of `foo`. So, who's
-"at fault" for a deadlock like this?
+`foo` directly, and the author of `main` has never heard of `foo`. Who's "at
+fault" for a deadlock like this?
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
 ### `Future` docs
 
-> The focus of this RFC is the docs changes in the subsection "The `poll`
-> method" below. The following is a general intro that might lead into that
-> section, both to avoid presenting it in a vacuum, and to make this whole RFC
-> slightly more accessible to folks who haven't written a ton of async Rust.
+> The focus of this RFC is the new/clarified polling responsibility in the
+> subsection "The `poll` method" below. The following is an expanded general
+> intro to lead into that section, both to avoid presenting it in a vacuum, and
+> to make the RFC slightly more accessible to folks who haven't written a ton
+> of async Rust.
 
 A future represents an asynchronous computation and the value it might
 eventually return. The most common way to create a future is to call an `async
-fn`. Often we `.await` these futures without giving them a name, like this:
+fn`. Often we `.await` a future without giving it a name, like this:
 
 ```rust
 async fn double(x: u32) -> u32 {
@@ -125,16 +125,16 @@ let my_output = my_future.await;
 assert_eq!(my_output, 84);
 ```
 
-Intuitively `u32` is the "return type" of `double`, but what we're seeing here
-is that the expression `double()` actually evaluates to a future, and we get a
-`u32` when we `.await` that future. We can look at `double` in two different
-ways: it's an `async fn` that returns `u32`, but it's also a regular function
-that returns a future whose output is a `u32`. That's what it means to be an
-`async fn`.
+Intuitively, `u32` is the "return type" of `double`, but here we see that the
+expression `double()` actually evaluates to a future, and we get the `u32` when
+we `.await` that future. We can look at `double` in two different ways: it's an
+`async fn` that returns `u32`, but it's also a regular function that returns a
+future whose output is a `u32`. That's what it means to be an `async fn`.
 
 Normally the compiler generates the "regular function that returns a future"
 for us, and we don't need to write it ourselves. But we can write it if we
-like. The following `fn double` is equivalent to `async fn double` above:
+like. The following `fn double` is a drop-in replacement for `async fn double`
+above:
 
 ```rust
 struct Foo(u32);
@@ -154,41 +154,87 @@ fn foo(x: u32) -> Foo {
 assert_eq!(double(42).await, 84);
 ```
 
-This version of the `foo` function explicitly returns a `Foo` future. It
-behaves like an `async fn`, and we can `.await` it the same way. Implementing
-the `Future` trait is what makes `Foo` a future. And the core of the `Future`
-trait is the `poll` method.
+This version of `foo` explicitly returns a `Foo` future. It behaves like an
+`async fn`, and we call it and `.await` it the same way. Implementing the
+`Future` trait is what makes `Foo` a future, and the core of the `Future` trait
+is the `poll` method.
 
 #### The `poll` method
 
-The `poll` method has three responsibilities:
+The `Future::poll` method is called with a `Context` and (inside that) a
+`Waker`, and it returns either `Poll::Ready(_)` or `Poll::Pending`. `poll` has
+three responsibilities:
 
-1. It performs as much of the future's remaining work as it can finish
-   promptly, without blocking the caller. In terms of an `async` block or
-   function, that means continuing to execute the body until control reaches
-   either an exit or a pending `.await`, i.e. another future whose `poll`
-   method returns `Poll::Pending`.
+1. Perform as much of the future's remaining work as possible, while returning
+   promptly and not blocking the caller.
 
-2. If the future's work is finished, `poll` returns `Poll::Ready` containing
-   its output. If the caller is an `.await` expression, this output becomes the
-   expression's value.
+2. If the future's work is finished, return `Ready(_)` containing its
+   output.
 
-3. Otherwise, `poll` return `Poll::Pending`. In this case, it also arranges to
-   invoke the caller's `Waker` when the future should be polled again. In
-   practice, most `poll` methods call other `poll` methods internally, and they
-   rely on their callees to arrange wakeups. Eventually this bottoms out at
-   operating system APIs and the implementation details of the current async
-   runtime.
+3. Otherwise, arrange to invoke the caller's `Waker` when the future should be
+   polled again, and return `Pending`.
 
-The `poll` method also imposes two responsibilities on its caller:
+In the common case of a compiler-generated future that represents an `async`
+block or function, these responsibilities mean that `poll` will:
 
-1. After `poll` returns `Poll::Ready`, the caller should not call `poll` again.
-   Further calls to `poll` may panic or otherwise misbehave (within the bounds
-   of safe code).
+1. Begin or resume executing the body. If control reaches an `.await` of an
+   inner future, and polling that inner future returns `Ready(_)`, continue
+   execution without returning.
 
-2. **[New in this RFC]** If the last call to `poll` returned `Poll::Pending`,
-   and the `Waker` passed to that call is later invoked, and the future hasn't
-   been dropped in the meantime, the caller should `poll` again _promptly_.
+2. If control reaches an exit (end-of-scope, `return`, or a short-circuiting
+   `?`), return `Ready(_)` wrapping the body's return value.
+
+3. If control reaches an `.await` of an inner future, and polling that inner
+   future returns `Pending`, stop executing the body and return `Pending`. Rely
+   on the inner future to trigger a wakeup when it should be polled again.
+   (Some low-level futures use operating system APIs like `epoll` to implement
+   wakeups, but `async fn` futures almost always delegate this.)
+
+The `poll` method also imposes three responsibilities on its caller:
+
+1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
+   should drop the future promptly. Further calls to `poll` may panic or
+   otherwise misbehave (within the bounds of safe code).
+
+2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
+   that call is later invoked, and the future hasn't been dropped in the
+   meantime, the caller should `poll` again promptly.
+
+3. If `poll` panics without terminating the whole process, the caller should
+   not call `poll` again and should drop the future promptly.
+
+Here's an example of a `Future` implementation that fails that second
+requirement, a.k.a. "the `Poll::Pending` rule":
+
+```rust
+pub struct CoinFlip<Fut>(#[pin] Fut); // TODO: a standard way to do pin projection
+
+impl<Fut: Future> Future for CoinFlip<Fut> {
+    type Output = Fut::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Fut::Output> {
+        if rand::random() {
+            self.project().0.poll(cx) // TODO: a standard way to do pin projection
+        } else {
+            Poll::Pending
+        }
+    }
+}
+```
+
+The problem here is that `random` might be true the first time, polling the
+inner `Fut` and letting it register wakeups, but then it might be false the
+second time when those wakeups trigger, failing to poll `Fut` promptly. This
+mistake tends to cause hangs and deadlocks, and `CoinFlip` would be "at fault"
+for those bugs. There are three ways we can fix it:
+
+1. Return `Ready` in the `else` branch, which requires the caller to drop
+   `CoinFlip` promptly. This would also mean changing the `Output` type to
+   `Option<_>`, or maybe adding a `Default` bound.
+2. Drop the inner `Fut` in the `else` branch before returning `Pending`. We'd
+   need to make `self.0` an `Option<_>` or similar.
+3. Panic in the `else` branch. This probably isn't what users want, but it's
+   technically correct, the best kind of correct.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
