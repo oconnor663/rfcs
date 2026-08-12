@@ -10,18 +10,18 @@ Clarify and document the contract requirements of the `Future::poll` method, in
 particular that a future should be polled or dropped promptly when it requests
 a wakeup. More generally, document what it means to cancel a future.
 
-There are widely used patterns in async Rust that violate that "poll promptly
+There are widely used patterns in async Rust that violate this "poll promptly
 requirement", including `select!`-by-reference and `StreamExt::next`. This RFC
-identifies several of them, but it avoids endorsing specific changes beyond the
-`Future` docs. Some will need follow-up RFCs of their own and/or time to
-experiment with alternatives in the ecosystem.
+identifies several, but it avoids endorsing specific changes beyond the
+`Future` docs. Some changes will need follow-up RFCs of their own and/or time
+to experiment with alternatives in the ecosystem.
 
 ## Motivation
 [motivation]: #motivation
 
 Consider this contrived deadlock example ([playground link][foo1]):
 
-[foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28future1%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28%26mut+future1%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
 async fn foo() {
@@ -33,8 +33,9 @@ async fn foo() {
 
 #[tokio::main]
 async fn main() {
-    let future1 = pin!(foo());
-    _ = poll!(future1);
+    let mut future1 = pin!(foo());
+    _ = poll!(&mut future1);
+    println!("We make it here...");
     foo().await; // Deadlock!
 }
 ```
@@ -58,11 +59,11 @@ async fn main() {
 }
 ```
 
-This still isn't very realistic, because nothing is making us use `pin!` here.
-(And passing `future1` to `timeout` by value would fix the deadlock, because
-then we'd drop it when the timeout expires.) Usually we only need `pin!` when
-we're driving a future in a loop. Let's put the loop in, and while we're add it
-we'll add a couple layers of abstraction around `foo` ([playground
+This still isn't very realistic, because nothing forces us to use `pin!` here.
+(Passing `future1` to `timeout` by value would fix the deadlock, because we'd
+drop it when the timeout expires.) What usually forces us to use `pin!` is when
+we're driving a future in a loop. Let's put the loop in, and while we're at it,
+let's add a couple layers of abstraction around `foo` ([playground
 link][foo3]):
 
 [foo3]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
@@ -87,12 +88,11 @@ async fn main() {
 }
 ```
 
-Now we're starting to see how these things happen in practice. To complete the
-illusion, imagine that `foo`, `bar`, `baz`, and `main` are all defined in
-different crates. The lock is private to `foo`, but the `main` crate doesn't
-depend on `foo`. The author of `main` might never even have heard of `foo`, to
-say nothing of its private implementation details. So, who's "at fault" for a
-deadlock like this?
+Now we can see how these things happen in practice. To complete the illusion,
+imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
+crates. The lock is private to `foo`, but the `main` crate doesn't depend on
+`foo`, and the author of `main` might never even have heard of `foo`. So, who's
+"at fault" for a deadlock like this?
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -106,7 +106,7 @@ deadlock like this?
 
 A future represents an asynchronous computation and the value it might
 eventually return. The most common way to create a future is to call an `async
-fn`. Often we `.await` a future without giving it a name, like this:
+fn`. Often we `.await` these futures without giving them a name, like this:
 
 ```rust
 async fn double(x: u32) -> u32 {
@@ -129,12 +129,12 @@ Intuitively `u32` is the "return type" of `double`, but what we're seeing here
 is that the expression `double()` actually evaluates to a future, and we get a
 `u32` when we `.await` that future. We can look at `double` in two different
 ways: it's an `async fn` that returns `u32`, but it's also a regular function
-that returns a future _whose output_ is a `u32`. That's what it means to be an
+that returns a future whose output is a `u32`. That's what it means to be an
 `async fn`.
 
 Normally the compiler generates the "regular function that returns a future"
-part for us, and we don't need to write it out ourselves. But we can write it
-if we like. The following `fn double` is equivalent to `async fn double` above:
+for us, and we don't need to write it ourselves. But we can write it if we
+like. The following `fn double` is equivalent to `async fn double` above:
 
 ```rust
 struct Foo(u32);
@@ -154,16 +154,41 @@ fn foo(x: u32) -> Foo {
 assert_eq!(double(42).await, 84);
 ```
 
-Here the `foo` function returns a `Foo` future, so it behaves like an `async
-fn`, and we can `.await` it the same way. What makes `Foo` a future is that it
-implements the `Future` trait. And the core of the `Future` trait is the `poll`
-method.
+This version of the `foo` function explicitly returns a `Foo` future. It
+behaves like an `async fn`, and we can `.await` it the same way. Implementing
+the `Future` trait is what makes `Foo` a future. And the core of the `Future`
+trait is the `poll` method.
 
 #### The `poll` method
 
-> As mentioned above, here's where the important changes in this RFC begin.
+The `poll` method has three responsibilities:
 
-...
+1. It performs as much of the future's remaining work as it can finish
+   promptly, without blocking the caller. In terms of an `async` block or
+   function, that means continuing to execute the body until control reaches
+   either an exit or a pending `.await`, i.e. another future whose `poll`
+   method returns `Poll::Pending`.
+
+2. If the future's work is finished, `poll` returns `Poll::Ready` containing
+   its output. If the caller is an `.await` expression, this output becomes the
+   expression's value.
+
+3. Otherwise, `poll` return `Poll::Pending`. In this case, it also arranges to
+   invoke the caller's `Waker` when the future should be polled again. In
+   practice, most `poll` methods call other `poll` methods internally, and they
+   rely on their callees to arrange wakeups. Eventually this bottoms out at
+   operating system APIs and the implementation details of the current async
+   runtime.
+
+The `poll` method also imposes two responsibilities on its caller:
+
+1. After `poll` returns `Poll::Ready`, the caller should not call `poll` again.
+   Further calls to `poll` may panic or otherwise misbehave (within the bounds
+   of safe code).
+
+2. **[New in this RFC]** If the last call to `poll` returned `Poll::Pending`,
+   and the `Waker` passed to that call is later invoked, and the future hasn't
+   been dropped in the meantime, the caller should `poll` again _promptly_.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
