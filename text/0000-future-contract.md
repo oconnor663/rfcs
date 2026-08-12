@@ -278,13 +278,47 @@ execution and thereby (accidentally, unknowingly) holding the lock _forever_.
 
 ### What exactly does "promptly" mean?
 
-This is the technical portion of the RFC. Explain the design in sufficient detail that:
+The usual expected behavior is that an implementation of `poll` should call
+`poll` on all of its child futures (if any) before returning. However, there
+are other valid ways to do things. Some async runtimes may [track an execution
+"budget"][budget], such that some of their futures return `Pending` earlier
+than usual once that budget is used up. In that case they arrange to get polled
+again as soon as other tasks have had a chance to run, and those other tasks'
+`poll` functions are also subject to the "return promptly" requirement, so any
+work deferred to the re-poll can still be considered prompt. Some futures might
+also offload their work to other threads, and their `poll` function might
+return without waiting for a completion notification from those threads.
 
-- Its interaction with other features is clear.
-- It is reasonably clear how the feature would be implemented.
-- Corner cases are dissected by example.
+[budget]: https://tokio.rs/blog/2020-04-preemption
 
-The section should return to the examples given in the previous section, and explain more fully how the detailed proposal makes those examples work.
+What these cases have in common is that, barring program exit or the power
+going out, future progress is guaranteed. There's no (legitimate) way for user
+code to stop the runtime from working through its task list or freeze a private
+worker thread. This is in contrast to the deadlocks in the Motivation section,
+where a future is suspended across some arbitrary bit of user code that isn't
+guaranteed to ever finish.
+
+A fully formal definition of this rule will probably end up with somewhat
+unsatisfying wording like "a finite period of time". Consider this excerpt from
+[the C++ atomic memory model][finite]:
+
+> An implementation should ensure that the last value (in modification order)
+> assigned by an atomic or synchronization operation will become visible to all
+> other threads **in a finite period of time**.
+
+[finite]: https://github.com/cplusplus/draft/blob/4358c6f6856ac8b392b601f820bce7bb134cbeed/source/basic.tex#L7291-L7293
+
+The atomic memory model is concerned with operations that complete in
+_nanoseconds_, but nonetheless it's hard to give a specific number of
+nanoseconds, or even a more abstract bound like "ticks" or "steps", without
+getting into details of the hardware that the standard doesn't want to
+constrain. Similarly, async Rust needs to accommodate all sorts of runtimes,
+evented IO models, and OS environments, and that makes it hard for the formal,
+general rules to say much about anything that goes on under the hood. Using
+terms like "promptly" in our documentation is helpful for building intuition
+about how async programs work, but in the end we'll probably define them in the
+negative: If something never happens at all, then surely we can all agree it
+didn't happen promptly.
 
 ## Drawbacks
 [drawbacks]: #drawbacks
