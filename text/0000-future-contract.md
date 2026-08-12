@@ -186,9 +186,12 @@ block or function, these responsibilities mean that `poll` will:
 
 3. If control reaches an `.await` of an inner future, and polling that inner
    future returns `Pending`, stop executing the body and return `Pending`. Rely
-   on the inner future to trigger a wakeup when it should be polled again.
-   (Some low-level futures use operating system APIs like `epoll` to implement
-   wakeups, but `async fn` futures almost always delegate this.)
+   on the inner future to invoke the `Waker` when it should be polled again.
+   (Some low-level futures use operating system APIs like [`epoll`] to
+   implement wakeups, but `async fn` futures almost always delegate this
+   responsibility.)
+
+[`epoll`]: https://en.wikipedia.org/wiki/Epoll
 
 The `poll` method also imposes three responsibilities on its caller:
 
@@ -204,7 +207,7 @@ The `poll` method also imposes three responsibilities on its caller:
    not call `poll` again and should drop the future promptly.
 
 Here's an example of a `Future` implementation that fails that second
-requirement, a.k.a. "the `Poll::Pending` rule":
+requirement, a.k.a. the "`Poll::Pending` rule":
 
 ```rust
 pub struct CoinFlip<Fut>(#[pin] Fut); // TODO: a standard way to do pin projection
@@ -236,8 +239,44 @@ for those bugs. There are three ways we can fix it:
 3. Panic in the `else` branch. This probably isn't what users want, but it's
    technically correct, the best kind of correct.
 
+#### Cancellation
+
+Unlike threads, which have a life of their own once they start running, a
+future only makes progress when something polls it. A future's owner can
+effectively pause its execution by _not_ polling it again. However, the
+"`Poll::Pending` rule" above tightly constrains our options here: Whoever last
+called `poll` is supposed to make sure that `poll` gets called again promptly
+after a wakeup, unless the future is dropped in the meantime. If a wakeup
+arrives, and a future's owner doesn't want to poll it -- say because it's
+exceeded a timeout, or because its output is no longer needed -- they must drop
+it promptly. When we drop a still-pending future like this, we call that
+"cancellation".
+
+There's nothing particularly special about cancelling a future compared to
+dropping any other Rust object. Its `Drop::drop` function runs (if any), and
+then the `Drop::drop` functions of its fields run (if any), all as usual.
+Importantly, this does include local variables in `async` blocks and functions,
+which are fields in their compiler-generated futures. It's good that we don't
+leak those, of course. But perhaps the most important thing to understand about
+cancellation is less what it _does_, and more that we can be _forced to do it_.
+The `Poll::Pending` rule requires every future to actively participate in what
+we might call the "`Waker` protocol" between its caller and any child futures
+it might contain. When a future is polled, it can poll its own children in
+turn, or it can cancel them by dropping them (either directly or indirectly,
+e.g. by returning `Ready` and trusting the caller to drop it), but it can't
+silently ignore a child's wakeup.
+
+This turns out to be essential for futures that can acquire locks or other
+exclusive resources. If a future is supposed to hold a lock for a short time,
+the programmer needs to consider how it might release that lock sooner if it's
+cancelled, or maybe a bit later because of timer slack or CPU load. But the
+programmer doesn't need to worry about the caller's caller's caller pausing
+execution and thereby (accidentally, unknowingly) holding the lock _forever_.
+
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
+
+### What exactly does "promptly" mean?
 
 This is the technical portion of the RFC. Explain the design in sufficient detail that:
 
