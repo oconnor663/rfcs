@@ -112,14 +112,6 @@ The `poll` method also imposes two responsibilities on its caller:
    that call is later invoked, and the future hasn't been dropped in the
    meantime, the caller should **`poll` again promptly.**
 
-> We could consider a third responsibility here regarding panicking: "If `poll`
-> panics without terminating the whole process, the caller should not call
-> `poll` again and should drop the future promptly." On the other hand, futures
-> that use `catch_unwind` and therefore need to worry about this are extremely
-> rare, and this isn't really a pressing concern for the ecosystem. We could
-> also consider folding this into the first case above, since the requirement
-> is the same.
-
 ### expanded `Future` docs
 
 > The this section repeats the important text above, but in the context of an
@@ -380,9 +372,19 @@ Please also take into consideration that rust sometimes intentionally diverges f
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
 
-- What parts of the design do you expect to resolve through the RFC process before this gets merged?
-- What parts of the design do you expect to resolve through the implementation of this feature before stabilization?
-- What related issues do you consider out of scope for this RFC that could be addressed in the future independently of the solution that comes out of this RFC?
+### Should we document a requirement for when `poll` panics?
+
+In addition to the "`Poll::Ready` rule" (drop promptly) and the
+"`Poll::Pending` rule" (poll again promptly after a wakeup), we could consider
+a third rule regarding panicking. For example:
+
+> If `poll` panics without terminating the whole process, the caller should not
+> call `poll` again and should drop the future promptly.
+
+On the other hand, futures that use `catch_unwind` and therefore need to worry
+about this are extremely rare, and this isn't really a pressing concern for the
+ecosystem. We could also consider folding this into the `Poll::Ready` rule,
+since the requirement is the same.
 
 ## Future possibilities
 [future-possibilities]: #future-possibilities
