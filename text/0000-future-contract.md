@@ -96,13 +96,38 @@ fault" for a deadlock like this?
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-### `Future` docs
+### important new text in the `Future` docs
 
-> The focus of this RFC is the new/clarified polling responsibility, which are
-> bolded in the subsection "The `poll` method" below. The following is an
-> expanded general intro to lead into that section, both to avoid presenting it
-> in a vacuum, and to make the RFC slightly more accessible to folks who
-> haven't written a ton of async Rust.
+> This section of new text is the focus of this whole RFC. It's presented here
+> without any context, for readers who are already familiar with the `Future`
+> docs.
+
+The `poll` method also imposes two responsibilities on its caller:
+
+1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
+   should **drop the future promptly**. Further calls to `poll` may panic or
+   otherwise misbehave (within the bounds of safe code).
+
+2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
+   that call is later invoked, and the future hasn't been dropped in the
+   meantime, the caller should **`poll` again promptly.**
+
+> We could consider a third responsibility here regarding panicking: "If `poll`
+> panics without terminating the whole process, the caller should not call
+> `poll` again and should drop the future promptly." On the other hand, futures
+> that use `catch_unwind` and therefore need to worry about this are extremely
+> rare, and this isn't really a pressing concern for the ecosystem. We could
+> also consider folding this into the first case above, since the requirement
+> is the same.
+
+### expanded `Future` docs
+
+> The this section repeats the important text above, but in the context of an
+> an expanded intro to `Future`, the way new learners might encounter it. This
+> is both to avoid presenting the important part entirely in a vacuum, and also
+> to make this RFC slightly more accessible to folks who haven't written a ton
+> of async Rust. The other details in this intro aren't new in this RFC, and a
+> PR adding docs like this might not need to go through the RFC process.
 
 A future represents an asynchronous computation and the value it might
 eventually return. The most common way to create a future is to call an `async
@@ -193,6 +218,8 @@ block or function, these responsibilities mean that `poll` will:
 
 [`epoll`]: https://en.wikipedia.org/wiki/Epoll
 
+> Here's the important new part that's excerpted in the previous section.
+
 The `poll` method also imposes two responsibilities on its caller:
 
 1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
@@ -203,13 +230,8 @@ The `poll` method also imposes two responsibilities on its caller:
    that call is later invoked, and the future hasn't been dropped in the
    meantime, the caller should **`poll` again promptly.**
 
-> We could consider a third responsibility here regarding panicking: "If `poll`
-> panics without terminating the whole process, the caller should not call
-> `poll` again and should drop the future promptly." On the other hand, futures
-> that use `catch_unwind` and therefore need to worry about this are extremely
-> rare, and this isn't really a pressing concern for the ecosystem. We could
-> also consider folding this into the first case above, since the requirement
-> is the same.
+> Everything that follows, including the "Cancellation" section below, assumes
+> those new rules and elaborates on them.
 
 Here's an example of a `Future` implementation that fails that second
 requirement, a.k.a. the "`Poll::Pending` rule":
