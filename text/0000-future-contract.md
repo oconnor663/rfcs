@@ -215,14 +215,14 @@ Here's an example of a `Future` implementation that fails that second
 requirement, a.k.a. the "`Poll::Pending` rule":
 
 ```rust
-pub struct CoinFlip<Fut>(#[pin] Fut); // TODO: a standard way to do pin projection
+pub struct CoinFlip<Fut>(Pin<Box<Fut>>); // TODO: a standard way to do unboxed pin projection?
 
 impl<Fut: Future> Future for CoinFlip<Fut> {
     type Output = Fut::Output;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Fut::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Fut::Output> {
         if rand::random() {
-            self.project().0.poll(cx) // TODO: a standard way to do pin projection
+            self.0.as_mut().poll(cx)
         } else {
             Poll::Pending
         }
