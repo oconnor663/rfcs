@@ -8,7 +8,7 @@
 
 Clarify and document the contract requirements of the `Future::poll` method, in
 particular that a future should be polled or dropped promptly when it requests
-a wakeup. More generally, document what it means to cancel a future.
+a wakeup. Also, document what it means to cancel a future.
 
 There are widely used patterns in async Rust that violate this "poll promptly
 requirement", including `select!`-by-reference and `StreamExt::next`. This RFC
@@ -19,7 +19,20 @@ to experiment with alternatives in the ecosystem.
 ## Motivation
 [motivation]: #motivation
 
-Consider this contrived deadlock example ([playground link][foo1]):
+Cancellation is a well-established if under-documented feature of async Rust.
+But it has a obscure cousin that's not documented at all, and maybe not even a
+feature, what we might call "pausing" (complimentary) or "snoozing"
+(pejorative). Pausing is almost never explicitly supported,[^dioxus] but it's
+very common and surprisingly easy to snooze a future _accidentally_. This tends
+to cause confusing deadlocks, a.k.a. ["futurelocks"][futurelock]. Here's a
+minimal example ([playground link][foo1]):
+
+[^dioxus]: The only widely-used counterexample might be the Dioxus framework,
+    which [provides a `pause` method][dioxus_docs] and sometimes [calls it
+    automatically][dioxus_src].
+
+[dioxus_docs]: https://docs.rs/dioxus/0.7.10/dioxus/prelude/struct.UseFuture.html
+[dioxus_src]: https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/hooks/src/use_future.rs#L63-L72
 
 [foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28%26mut+future1%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
@@ -39,13 +52,33 @@ async fn main() {
 }
 ```
 
-`poll!` puts `future1` in the state where it's acquired `LOCK` and started
-sleeping, and then the second call to `foo` starts waiting for `LOCK`. We don't
-poll `future1` again or drop it while we're waiting, so this is a deadlock.
+The `poll!` macro calls `Future::poll` exactly once, driving `future1` to the
+point where it's acquired `LOCK` and started sleeping. The second call to `foo`
+tries to take the same lock, but while we're awaiting that, `future1` is
+implicitly snoozed.
 
-The `poll!` macro isn't common in practice, and a more realistic version of
-this example would use `select!`. However, to emphasize that this problem is
-broader than `select!`, let's use `timeout` instead ([playground link][foo2]):
+This is a contrived little example, and we don't often use `poll!` in
+production code. We'll expand the example to make it more realistic. But even
+before we do that, look at the `foo` function in isolation. It takes a private
+lock, sleeps for a few milliseconds, and releases the lock. If this was an
+ordinary, synchronous function, it would be _impossible_ to deadlock
+here.[^impossible] If we need to tolerate indefinite pauses at any `.await` in
+any function, is it ever safe to use an async lock? Hold that thought.
+
+[^impossible]: For certain definitions of "impossible". You could always attach
+    a debugger and pause the synchronous version of `foo` while it's holding
+    the lock. More to the point, you could call the Windows [`SuspendThread`]
+    function, or you could call `foo` from a Unix signal handler. All of these
+    are ways to deadlock the synchronous version, but they're also _breaking
+    the rules_. Application code isn't expected to defend itself from
+    debuggers, and functions like `SuspendThread` and `sigaction` are [widely
+    understood](https://jacko.io/snooze.html#threads) to be radioactive.
+
+[`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
+
+A more realistic version of this example would replace `poll!` with `select!`.
+However, to emphasize that this problem is broader than `select!`, let's use
+`timeout` instead ([playground link][foo2]):
 
 [foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+%26mut+future1%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D%0A>
 
@@ -58,12 +91,11 @@ async fn main() {
 }
 ```
 
-This still isn't very realistic, because nothing forces us to use `pin!` here.
-(Passing `future1` to `timeout` by value would fix the deadlock, because we'd
-drop it when the timeout expires.) What usually forces us to use `pin!` is when
-we're driving a future in a loop. Let's put the loop in, and while we're at it,
-let's add a couple layers of abstraction around `foo` ([playground
-link][foo3]):
+This is still contribed, because nothing forces us to use `pin!` here. (Passing
+`future1` to `timeout` by value would fix the deadlock, because we'd drop it
+when the timeout expires.) Driving a future in a loop is what usually requires
+`pin!`, so let's put in a loop. While we're at it, let's also add a couple
+layers of abstraction around `foo` ([playground link][foo3]):
 
 [foo3]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
@@ -87,11 +119,11 @@ async fn main() {
 }
 ```
 
-Now we can see how these things happen in practice. To complete the illusion,
+Now this is code someone might actually write. To complete the illusion,
 imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
-crates. The lock is private to `foo`, but the `main` crate doesn't depend on
-`foo` directly, and the author of `main` has never heard of `foo`. Who's "at
-fault" for a deadlock like this?
+crates. The lock is private to `foo`, but `main` doesn't depend on `foo`
+directly, and in fact the author has never heard of `foo`. Who's "at fault" for
+a deadlock like this?
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -317,7 +349,7 @@ worker thread. This is in contrast to the deadlocks in the Motivation section,
 where a future is suspended across some arbitrary bit of user code that isn't
 guaranteed to ever finish.
 
-A fully formal definition of this rule will probably end up with somewhat
+A fully formal definition of "promptly" will probably end up with somewhat
 unsatisfying wording like "a finite period of time". Consider this excerpt from
 [the C++ atomic memory model][finite]:
 
@@ -334,10 +366,11 @@ getting into details of the hardware that the standard doesn't want to
 constrain. Similarly, async Rust needs to accommodate all sorts of runtimes,
 evented IO models, and OS environments, and that makes it hard for the formal,
 general rules to say much about anything that goes on under the hood. Using
-terms like "promptly" in our documentation is helpful for building intuition
-about how async programs work, but in the end we'll probably define them in the
-negative: If something never happens at all, then surely we can all agree it
-didn't happen promptly.
+terms like "promptly" in our documentation is useful for building intuition
+about how async programs work, and for helping different layers of the stack
+understand each other's intent, but in the end we'll probably define them in
+the negative: If something never happens at all, then clearly it didn't happen
+promptly.
 
 ## Drawbacks
 [drawbacks]: #drawbacks
@@ -406,3 +439,6 @@ Note that having something written down in the future-possibilities section
 is not a reason to accept the current or a future RFC; such notes should be
 in the section on motivation or rationale in this or subsequent RFCs.
 The section merely provides additional information.
+
+[futurelock]: https://rfd.shared.oxide.computer/rfd/0609
+[snooze]: https://jacko.io/snooze.html
