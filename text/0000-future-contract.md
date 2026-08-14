@@ -150,55 +150,55 @@ eventually return. The most common way to create a future is to call an `async
 fn`. Often we `.await` a future without giving it a name, like this:
 
 ```rust
-async fn double(x: u32) -> u32 {
-    2 * x
+async fn add_one(x: u32) -> u32 {
+    x + 1
 }
 
-assert_eq!(double(42).await, 84);
+assert_eq!(add_one(42).await, 43);
 ```
 
 If we break that last line into three lines, we can see some of the temporary
 values involved:
 
 ```rust
-let my_future = double(42);
+let my_future = add_one(42);
 let my_output = my_future.await;
-assert_eq!(my_output, 84);
+assert_eq!(my_output, 43);
 ```
 
-Intuitively, `u32` is the "return type" of `double`, but here we see that the
-expression `double()` actually evaluates to a future, and we get a `u32` when
-we `.await` that future. We can look at `double` in two different ways: it's an
-`async fn` that returns `u32`, but it's also a regular function that returns a
-future whose output is `u32`. That's what it means to be an `async fn`.
+Intuitively, `u32` is the "return type" of `add_one`, but here we see that the
+expression `add_one()` actually evaluates to a future, and we get a `u32` when
+we `.await` that future. We can look at `add_one` in two different ways: it's
+an `async fn` that returns `u32`, but it's also a regular function that returns
+a future whose output is `u32`. That's what it means to be an `async fn`.
 
 Normally the compiler generates the "regular function that returns a future"
 for us, and we don't need to write it ourselves. But we can write it if we
-like. The following `fn double` is a drop-in replacement for `async fn double`
-above:
+like. The following `fn add_one` is a drop-in replacement for `async fn
+add_one` above:
 
 ```rust
-struct Foo(u32);
+struct AddOne(u32);
 
-impl Future for Foo {
+impl Future for AddOne {
     type Output = u32;
 
     fn poll(self: Pin<&mut Self>, _: &mut Context) -> Poll<u32> {
-        Poll::Ready(self.0 * 2)
+        Poll::Ready(self.0 + 1)
     }
 }
 
-fn foo(x: u32) -> Foo {
-    Foo(x)
+fn add_one(Foox: u32) -> AddOne {
+    AddOne(x)
 }
 
-assert_eq!(double(42).await, 84);
+assert_eq!(add_one(42).await, 43);
 ```
 
-This version of `foo` explicitly returns a `Foo` future. It behaves like an
-`async fn`, and we call it and `.await` it the same way. Implementing the
-`Future` trait is what makes `Foo` a future, and the core of the `Future` trait
-is the `poll` method.
+This version of `add_one` explicitly returns a `AddOne` future. It behaves like
+an `async fn`, and we call it and `.await` it the same way. Implementing the
+`Future` trait is what makes `AddOne` a future, and the core of the `Future`
+trait is the `poll` method.
 
 #### The `poll` method
 
