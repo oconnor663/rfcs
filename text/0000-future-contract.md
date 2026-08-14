@@ -121,9 +121,9 @@ Who's "at fault" for a deadlock like this?
 
 ### important new text in the `Future` docs
 
-> This section of new text is the focus of this whole RFC. It's presented here
-> without any context, for readers who are already familiar with the `Future`
-> docs.
+> This new text is the focus of this whole RFC. It's presented here in
+> isolation, for readers who want to see the important part first and who don't
+> need context. It's repeated in context in the following section.
 
 The `poll` method also imposes two responsibilities on its caller:
 
@@ -395,6 +395,46 @@ Please also take into consideration that rust sometimes intentionally diverges f
 
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
+
+### Should we allow a delay between creation and polling?
+
+In other words, should the following be allowed, or should it e.g. fail Clippy?
+
+```rust
+let future1 = foo();
+let future2 = foo();
+future1.await;
+future2.await;
+```
+
+We could say that `future2` is snoozed here across the first await. On the
+other hand, `future2` has never been polled (or even pinned), and it's not
+likely to be holding onto any exclusive resources in its initial state. We
+could imagine giving `foo` e.g. a `MutexGuard` argument, but in that case the
+caller could clearly see what's going on. To create a true "nonlocal reasoning"
+problem, we'd need to write `foo` in a sync-then-async style, like this:
+
+```rust
+fn foo() -> impl Future<Output = ()> {
+    static LOCK: Mutex<()> = Mutex::const_new(());
+    // Try to acquire `LOCK` synchronously. If we get it, the returned future takes ownership of the guard.
+    let mut _guard = LOCK.try_lock().ok();
+    async move {
+        if _guard.is_none() {
+            _guard = Some(LOCK.lock().await);
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+```
+
+This style is uncommon, and there might not be any examples in the wild that
+actually combine this style with an exclusive resource acquired in the sync
+phase. On the other hand, there are published `Future` extension methods (e.g.
+[`delay`] in `async-std`) that are only correct if delayed initial polling is
+acceptable.
+
+[`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
 
 ### Should we document a requirement for when `poll` panics?
 
