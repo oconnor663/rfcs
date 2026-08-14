@@ -23,7 +23,7 @@ RFC identifies several, but it avoids endorsing specific changes beyond the
 [motivation]: #motivation
 
 Cancellation is a well-established if under-documented feature of async Rust.
-But it has a obscure cousin that's not documented at all, and maybe not even a
+But it has an obscure cousin that's not documented at all, and maybe not even a
 feature, what we might call "pausing" (complimentary) or "snoozing"
 (pejorative). Pausing is almost never explicit,[^dioxus] but it's common and
 surprisingly easy to snooze a future _implicitly_. This can cause hangs and
@@ -37,7 +37,7 @@ deadlocks, most famously ["Futurelock"][futurelock]. Here's a minimal example
 [dioxus_docs]: https://docs.rs/dioxus/0.7.10/dioxus/prelude/struct.UseFuture.html
 [dioxus_src]: https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/hooks/src/use_future.rs#L63-L72
 
-[foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28%26mut+future1%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28future1%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
 async fn foo() {
@@ -49,41 +49,44 @@ async fn foo() {
 
 #[tokio::main]
 async fn main() {
-    let mut future1 = pin!(foo());
-    _ = poll!(&mut future1);
+    let future1 = pin!(foo());
+    _ = poll!(future1);
     foo().await; // Deadlock!
 }
 ```
 
 The [`poll!`] macro calls `Future::poll` exactly once, driving `future1` to the
 point where it's acquired `LOCK` and started sleeping. The second call to `foo`
-tries to take the same lock, but nothing is polling `future1` during that
-`.await`, and the result is a deadlock.
+tries to take the same lock, but nothing polls `future1` during that `.await`,
+so the result is a deadlock.
 
 [`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
 
-`poll!` is rare outside of tests, so let's make this more realistic. The
-culprit in practice is often [`select!`], as it was in "Futurelock". But to
-emphasize that this is a broader problem, let's use [`timeout`] instead
-([playground link][foo2]):
+We don't often use `poll!` outside of tests, so let's make this example more
+realistic. The most common way we snooze futures in practice is [`select!`],
+and that's how ["Futurelock"][futurelock] happened. But to emphasize that this
+is a broader problem, let's use [`timeout`] instead ([playground link][foo2]):
 
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
-[foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+%26mut+future1%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D%0A>
+[foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+future1%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
 #[tokio::main]
 async fn main() {
-    let mut future1 = pin!(foo());
-    _ = timeout(Duration::from_millis(1), &mut future1).await;
+    let future1 = pin!(foo());
+    _ = timeout(Duration::from_millis(1), future1).await;
     foo().await; // Deadlock!
 }
 ```
 
-This is still contrived, because we wouldn't normally use `pin!` here. Driving
-futures in a loop is what usually forces us to `pin!` things, so let's add a
-loop. We'll also add a couple "layers of abstraction" around `foo` while we're
-at it ([playground link][foo3]):
+This still isn't very realistic; it would be simpler and more correct to [pass
+`future1` to `timeout` by value][foo_by_value] instead of pinning it like this.
+Driving futures in a loop is usually what forces us to `pin!` things, so let's
+add a loop. Let's also add a couple layers of abstraction around `foo`, for
+dramatic effect ([playground link][foo3]):
+
+[foo_by_value]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+future1+%3D+foo%28%29%3B%0A++++%2F%2F+Passing+%60future1%60+to+%60timeout%60+by+value+means+that+it+drops+when%0A++++%2F%2F+the+timeout+expires%2C+releasing+%60LOCK%60+and+fixing+the+deadlock.%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+future1%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...and+also+here%21%22%29%3B%0A%7D>
 
 [foo3]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
@@ -110,7 +113,7 @@ async fn main() {
 Now this is starting to look like code someone might actually write. To
 complete the illusion, imagine that `foo`, `bar`, `baz`, and `main` are all
 defined in different crates. The lock is private to `foo`, but `main` doesn't
-depend on `foo` directly, and in fact the author has never heard of `foo`.
+depend on `foo` directly. Maybe the author of `main` has never heard of `foo`.
 Who's "at fault" for a deadlock like this?
 
 ## Guide-level explanation
