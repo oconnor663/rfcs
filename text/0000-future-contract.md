@@ -27,8 +27,10 @@ But it has an obscure cousin that's not documented at all, and maybe not even a
 feature, what we might call "pausing" (complimentary) or "snoozing"
 (pejorative). Pausing is almost never explicit,[^dioxus] but it's common and
 surprisingly easy to snooze a future _implicitly_. This can cause hangs and
-deadlocks, most famously ["Futurelock"][futurelock]. Here's a minimal example
-([playground link][foo1]):
+deadlocks, most famously ["Futurelock"][futurelock]. Let's look at a minimal
+example of one of these deadlocks, and then gradually expand it into code
+someone might actually write. Here's the minimal example ([playground
+link][foo1]):
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
@@ -62,10 +64,10 @@ so the result is a deadlock.
 
 [`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
 
-We don't often use `poll!` outside of tests, so let's make this example more
-realistic. The most common way we snooze futures in practice is [`select!`],
-and that's how ["Futurelock"][futurelock] happened. But to emphasize that this
-is a broader problem, let's use [`timeout`] instead ([playground link][foo2]):
+We don't often use `poll!` outside of tests. The most common way to snooze
+futures in practice is using [`select!`], which is how
+["Futurelock"][futurelock] did it. But to emphasize that this is a broader
+problem, let's use [`timeout`] instead ([playground link][foo2]):
 
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
@@ -141,8 +143,7 @@ The `poll` method also imposes two responsibilities on its caller:
 > an expanded intro to `Future`, the way new learners might encounter it. This
 > is both to avoid presenting the important part entirely in a vacuum, and also
 > to make this RFC slightly more accessible to folks who haven't written a ton
-> of async Rust. The other details in this intro aren't new in this RFC, and a
-> PR adding docs like this might not need to go through the RFC process.
+> of async Rust.
 
 A future represents an asynchronous computation and the value it might
 eventually return. The most common way to create a future is to call an `async
@@ -396,7 +397,7 @@ Please also take into consideration that rust sometimes intentionally diverges f
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
 
-### Should we allow a delay between creation and polling?
+### Should we allow a delay (e.g. another `.await`) between creation and polling?
 
 In other words, should the following be allowed, or should it e.g. fail Clippy?
 
@@ -409,9 +410,9 @@ future2.await;
 
 We could say that `future2` is snoozed here across the first await. On the
 other hand, `future2` has never been polled (or even pinned), and it's not
-likely to be holding onto any exclusive resources in its initial state. We
-could imagine giving `foo` e.g. a `MutexGuard` argument, but in that case the
-caller could clearly see what's going on. To create a true "nonlocal reasoning"
+likely to be holding any exclusive resources in its initial state. We could
+imagine giving `foo` e.g. a `MutexGuard` argument, but in that case the caller
+could clearly see what's going on. To create a true "nonlocal reasoning"
 problem, we'd need to write `foo` in a sync-then-async style, like this:
 
 ```rust
@@ -428,13 +429,13 @@ fn foo() -> impl Future<Output = ()> {
 }
 ```
 
-This style is uncommon, and there might not be any examples in the wild that
-actually combine this style with an exclusive resource acquired in the sync
-phase. On the other hand, there are published `Future` extension methods (e.g.
-[`delay`] in `async-std`) that are only correct if delayed initial polling is
-acceptable.
+This style is uncommon, and it's especially uncommon to combine it with eagerly
+acquired locks, but [here's an example of Wasmer doing it][wasmer]. At the same
+time, there are published `Future` extension methods (e.g. [`delay`] from
+`async-std`) that are only correct if delayed initial polling is acceptable.
 
 [`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
+[wasmer]: https://github.com/wasmerio/wasmer/blob/dce84a907542c331661f201eff9d898ecb2fbe08/lib/virtual-net/src/rx_tx.rs#L171-L187
 
 ### Should we document a requirement for when `poll` panics?
 
