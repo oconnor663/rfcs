@@ -6,14 +6,18 @@
 ## Summary
 [summary]: #summary
 
-Clarify and document the contract requirements of the `Future::poll` method, in
+Clarify and document the contract requirements of the [`Future::poll`] method, in
 particular that a future should be polled or dropped promptly when it requests
 a wakeup. Also, document what it means to cancel a future.
 
+[`Future::poll`]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
+
 There are widely used patterns in async Rust that violate this "poll promptly
-requirement", including `select!`-by-reference and `StreamExt::next`. This RFC
-identifies several, but it avoids endorsing specific changes beyond the
+requirement", including [`select!`]-by-reference and [`StreamExt::next`]. This
+RFC identifies several, but it avoids endorsing specific changes beyond the
 `Future` docs.
+
+[`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 
 ## Motivation
 [motivation]: #motivation
@@ -22,9 +26,9 @@ Cancellation is a well-established if under-documented feature of async Rust.
 But it has a obscure cousin that's not documented at all, and maybe not even a
 feature, what we might call "pausing" (complimentary) or "snoozing"
 (pejorative). Pausing is almost never explicit,[^dioxus] but it's common and
-surprisingly easy to snooze a future _implicitly_. This can cause deadlocks,
-most famously ["Futurelock"][futurelock]. Here's a minimal example ([playground
-link][foo1]):
+surprisingly easy to snooze a future _implicitly_. This can cause hangs and
+deadlocks, most famously ["Futurelock"][futurelock]. Here's a minimal example
+([playground link][foo1]):
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
@@ -51,14 +55,19 @@ async fn main() {
 }
 ```
 
-The `poll!` macro calls `Future::poll` exactly once, driving `future1` to the
+The [`poll!`] macro calls `Future::poll` exactly once, driving `future1` to the
 point where it's acquired `LOCK` and started sleeping. The second call to `foo`
-tries to take the same lock, but while we're awaiting that, `future1` is
-implicitly snoozed. The result is a deadlock.
+tries to take the same lock, but nothing is polling `future1` during that
+`.await`, and the result is a deadlock.
 
-This is a contrived example, and we don't often use `poll!` in production code.
-In "Futurelock" the culprit was `select!`, but to emphasize that this is a
-broader problem, let's use `timeout` instead ([playground link][foo2]):
+[`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
+
+`poll!` is rare outside of tests, so let's make this more realistic. The
+culprit in practice is often [`select!`], as it was in "Futurelock". But to
+emphasize that this is a broader problem, let's use [`timeout`] instead
+([playground link][foo2]):
+
+[`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
 [foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+%26mut+future1%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D%0A>
 
@@ -71,12 +80,10 @@ async fn main() {
 }
 ```
 
-This is still contrived, because there's no good reason to use `pin!` here.
-(Passing `future1` to `timeout` by value is easier and would fix the deadlock,
-because we'd drop it when the timeout expires.) Driving a future in a loop is
-usually what forces us to use `pin!`, so let's add a loop. While we're at it,
-we'll throw in a couple layers of abstraction around `foo` ([playground
-link][foo3]):
+This is still contrived, because we wouldn't normally use `pin!` here. Driving
+futures in a loop is what usually forces us to `pin!` things, so let's add a
+loop. We'll also add a couple "layers of abstraction" around `foo` while we're
+at it ([playground link][foo3]):
 
 [foo3]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
@@ -100,11 +107,11 @@ async fn main() {
 }
 ```
 
-Now this is code someone might actually write. To complete the illusion,
-imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
-crates. The lock is private to `foo`, but `main` doesn't depend on `foo`
-directly, and in fact the author has never heard of `foo`. Who's "at fault" for
-a deadlock like this?
+Now this is starting to look like code someone might actually write. To
+complete the illusion, imagine that `foo`, `bar`, `baz`, and `main` are all
+defined in different crates. The lock is private to `foo`, but `main` doesn't
+depend on `foo` directly, and in fact the author has never heard of `foo`.
+Who's "at fault" for a deadlock like this?
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -423,3 +430,4 @@ The section merely provides additional information.
 
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
 [snooze]: https://jacko.io/snooze.html
+[`select!`]: https://docs.rs/tokio/latest/tokio/macro.select.html
