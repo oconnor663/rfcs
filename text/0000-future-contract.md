@@ -69,7 +69,7 @@ that below, but first let's see how this situation can come up in normal code.
 `poll!` is a relatively obscure macro, so we'll replace it with something more
 realistic. The most common future snoozer in practice is [`select!`], which is
 how ["Futurelock"][futurelock] did it, but `select!` is a bit complicated, and
-this problem isn't specific to fancy macros. Let's use [`timeout`] ([playground
+this problem isn't specific to macros. Let's use [`timeout`] ([playground
 link][foo2]):
 
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
@@ -120,8 +120,23 @@ This is more realistic. To complete the illusion, imagine that `foo`, `bar`,
 `foo`, but `main` doesn't depend on `foo` directly. Maybe the author of `main`
 has never even heard of `foo`. Who's "at fault" for a deadlock like this?
 
-[`.lock()`]: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#method.lock
-[`Sleep`]: https://docs.rs/tokio/latest/tokio/time/fn.sleep.html
+Let's look more closely at the sequence of events. If we [add some
+prints][squawk], we can see that `main` gets polled three times. The first
+wakeup is at 0 ms is when control first enters `main`, the second is at 5-6 ms
+when the `timeout` expires, and the third is at 10-11 ms when the `sleep` in
+`bar` (that is, in `foo`) completes.[^slack] Control in `main` is in the
+`baz().await` expression at that point, so the `baz` future gets polled again,
+even though it didn't request a wakeup. That's not in and of itself a problem,
+since futures are expected to tolerate over-polling. The problem is that the
+`bar` future _did_ request a wakeup, but it did _not_ get polled. In the body
+of `foo`, control enters the 10 ms sleep, but it never comes back out again,
+even though all the `Waker` and timer machinery is working correctly. That's
+not ok.
+
+[squawk]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+Instant%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+main_inner%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D%0A%0A%2F%2F+Squawk+a+timestamp+every+time+%60future%60+gets+polled.%0Afn+squawk%3CFut%3A+Future%3E%28future%3A+Fut%29+-%3E+impl+Future%3COutput+%3D+Fut%3A%3AOutput%3E+%7B%0A++++let+start+%3D+Instant%3A%3Anow%28%29%3B%0A++++let+mut+future+%3D+Box%3A%3Apin%28future%29%3B%0A++++std%3A%3Afuture%3A%3Apoll_fn%28move+%7Ccx%7C+%7B%0A++++++++let+elapsed+%3D+Instant%3A%3Aelapsed%28%26start%29.as_secs_f32%28%29+*+1000.0%3B%0A++++++++println%21%28%22%5B%7Belapsed%3A.3%7D+ms%5D+POLLED%21%22%29%3B%0A++++++++future.as_mut%28%29.poll%28cx%29%0A++++%7D%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++squawk%28main_inner%28%29%29.await%3B%0A%7D>
+
+[^slack]: Tokio's timer implementation adds ~1 ms of slack to our 5 ms timeout
+    and our 10 ms sleep.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
