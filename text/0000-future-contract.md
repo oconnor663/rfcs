@@ -388,7 +388,68 @@ promptly.
 ## Drawbacks
 [drawbacks]: #drawbacks
 
-Why should we *not* do this?
+### Pausing things is useful, and it would've been nice to allow it.
+
+A video player with a pause button or an RPG with a time-stop spell might want
+to try implementing those things by non-cooperatively pausing some `async
+fn`.[^noncoop] That's probably not the best architecture, but effectively
+forbidding it at the language level seems quite opinionated.[^forbid]
+
+[^noncoop]: "Cooperative" vs "non-cooperative" has a couple different
+    interpretations in async Rust. From the perspective an executor thread
+    that's calling `Future::poll`, everything is cooperative, because we can't
+    force that function to to ever return. On the other hand, a `poll` function
+    that doesn't return promptly is gumming up the executor, and we have [tools
+    for finding those][slow_poll]. If we take it for granted that every buggy
+    `poll` function eventually gets fixed, then we could think of cancellation
+    in async Rust as _non_-cooperative, in that there's nothing an `async fn`
+    can legally do prevent it or delay it for very long.
+
+[slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
+
+[^forbid]: Of course applications can do whatever they like, and some might
+    "alter the deal" with the `Future` and define their own pausing primitives.
+    They wouldn't even need `unsafe` code to do that, just trait
+    implementations and (if this RFC gets its way) maybe suppressing some
+    Clippy lints. In a sense, what's at stake here is the question of who's at
+    fault when such an application collides with a library ecosystem that uses
+    private async locks.
+
+Similarly, Windows has the [`SuspendThread`] and [`TerminateThread`] functions
+for a reason. Over the years, many applications have wanted to
+non-cooperatively pause or cancel a thread.[^raymond_chen] Sometimes passing a
+cancel flag throughout a large application is too much trouble, and sometimes
+we're working with Other People's Code that we can't change. However, today we
+understand that these functions ([and their Unix
+equivalents](https://jacko.io/snooze.html#threads)) are _radioactive_ -- using
+them anywhere effectively corrupts the whole process -- and we categorically
+ban them.
+
+[`TerminateThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminatethread
+[`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
+
+[^raymond_chen]: "Originally, there was no `TerminateThread` function. The
+    original designers felt strongly that no such function should exist because
+    there was no safe way to terminate a thread, and there's no point having a
+    function that cannot be called safely. But people screamed that they needed
+    the `TerminateThread` function, even though it wasn't safe, so the
+    operating system designers caved and added the function because people
+    demanded it. Of course, those people who insisted that they needed
+    `TerminateThread` now regret having been given it." [- Raymond
+    Chen][raymond_chen]
+
+[raymond_chen]: https://devblogs.microsoft.com/oldnewthing/20150814-00/?p=91811
+
+Async Rust can support cancellation, even though threads can't, because the
+`Drop` machinery knows exactly what locks to release and what memory to free.
+But that's no help when it comes to pausing. Unless we have complete control,
+not only of every line of code we might pause, but also of every other line of
+code we might run before unpausing it, there's no way to know whether we're
+inviting a deadlock. In ["Futurelock"][futurelock], for example, the culprit
+was a semaphore buried in the `tokio::sync::mpsc` channel implementation.
+Pausing is fundamentally incompatible with library code that takes locks
+internally, and async Rust has to have an opinion about which of those two
+things we generally support.
 
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
