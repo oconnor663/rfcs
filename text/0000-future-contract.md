@@ -165,9 +165,9 @@ The `poll` method also imposes two responsibilities on its caller:
 > to make this RFC slightly more accessible to folks who haven't written a ton
 > of async Rust.
 
-A future represents an asynchronous computation and the value it might
-eventually return. The most common way to create a future is to call an `async
-fn`. Often we `.await` a future without giving it a name, like this:
+A future represents a possibly-ongoing asynchronous computation and the value
+it might eventually return. The most common way to create a future is to call
+an `async fn`. Often we `.await` a future without giving it a name, like this:
 
 ```rust
 async fn add_one(x: u32) -> u32 {
@@ -187,10 +187,11 @@ assert_eq!(my_output, 43);
 ```
 
 Intuitively, `u32` is the "return type" of `add_one`, but here we see that the
-expression `add_one()` actually evaluates to a future, and we get a `u32` when
-we `.await` that future. We can look at `add_one` in two different ways: it's
-an `async fn` that returns `u32`, but it's also a regular function that returns
-a future whose output is `u32`. That's what it means to be an `async fn`.
+expression `add_one()` actually evaluates to a future, and we get the `u32`
+when we `.await` that future. We can look at `add_one` in two different ways:
+it's an `async fn` that returns `u32`, but it's also a regular function that
+returns a future whose output is `u32`. That's what it means to be an `async
+fn`.
 
 Normally the compiler generates the "regular function that returns a future"
 for us, and we don't need to write it ourselves. But we can write it if we
@@ -310,28 +311,28 @@ effectively pause its execution by _not_ polling it again. However, the
 "`Poll::Pending` rule" above tightly constrains our options here: Whoever last
 called `poll` is supposed to make sure that `poll` gets called again promptly
 after a wakeup, unless the future is dropped in the meantime. If a wakeup
-arrives, and a future's owner doesn't want to poll it -- say because it's
-exceeded a timeout, or because its output is no longer needed -- they must drop
-it promptly. When we drop a still-pending future like this, we call that
-"cancellation".
+arrives, and we don't want to poll it -- say because it's exceeded a timeout,
+or because we no longer need its output -- we must drop it promptly. When we
+drop a still-pending future like this, we call that "cancellation".
 
 There's nothing particularly special about cancelling a future compared to
 dropping any other Rust object. Its `Drop::drop` function runs (if any), and
 then the `Drop::drop` functions of its fields run (if any), all as usual.
-Importantly, this does include local variables in `async` blocks and functions,
+Importantly, this includes local variables in `async` blocks and functions,
 which are fields in their compiler-generated futures. It's good that we don't
-leak those, of course. But perhaps the most important thing to understand about
-cancellation is less what it _does_, and more that we can be _forced to do it_.
-The `Poll::Pending` rule requires every future to actively participate in what
-we might call the "`Waker` protocol" between its caller and any child futures
-it might contain. When a future is polled, it can poll its own children in
-turn, or it can cancel them by dropping them (either directly or indirectly,
+leak those, of course. But the important thing to understand about cancellation
+is less _how_ we do it, and more that we're forced to _do something_ rather
+than nothing. The `Poll::Pending` rule requires every future to actively
+participate in what we might call the "`Waker` protocol" between its caller and
+any child futures it might contain. When a future is polled, it can poll its
+own children in turn (unless it knows for a fact that they did not request a
+wakeup), or it can cancel them by dropping them (either directly or indirectly,
 e.g. by returning `Ready` and trusting the caller to drop it), but it can't
 silently ignore a child's wakeup.
 
 This turns out to be essential for futures that can acquire locks or other
 exclusive resources. If a future is supposed to hold a lock for a short time,
-the programmer needs to consider how it might release that lock sooner if it's
+the programmer needs to consider that it might release the lock sooner if it's
 cancelled, or maybe a bit later because of timer slack or CPU load. But the
 programmer doesn't need to worry about the caller's caller's caller pausing
 execution and thereby (accidentally, unknowingly) holding the lock _forever_.
