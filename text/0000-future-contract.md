@@ -64,10 +64,13 @@ so the result is a deadlock.
 
 [`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
 
-We don't often use `poll!` outside of tests. The most common way to snooze
-futures in practice is using [`select!`], which is how
-["Futurelock"][futurelock] did it. But to emphasize that this is a broader
-problem, let's use [`timeout`] instead ([playground link][foo2]):
+It's worth looking at this sequence of events in finer detail, and we'll do
+that below, but first let's see how this situation can come up in normal code.
+`poll!` is a relatively obscure macro, so we'll replace it with something more
+realistic. The most common future snoozer in practice is [`select!`], which is
+how ["Futurelock"][futurelock] did it, but `select!` is a bit complicated, and
+this problem isn't specific to fancy macros. Let's use [`timeout`] ([playground
+link][foo2]):
 
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
@@ -82,10 +85,10 @@ async fn main() {
 }
 ```
 
-This still isn't very realistic; it would be simpler and more correct to [pass
+This still isn't very realistic. It would be simpler and more correct to [pass
 `future1` to `timeout` by value][foo_by_value] instead of pinning it like this.
 Driving futures in a loop is usually what forces us to `pin!` things, so let's
-add a loop. Let's also add a couple layers of abstraction around `foo`, for
+add a loop. We'll also add a couple layers of abstraction around `foo`, for
 dramatic effect ([playground link][foo3]):
 
 [foo_by_value]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+future1+%3D+foo%28%29%3B%0A++++%2F%2F+Passing+%60future1%60+to+%60timeout%60+by+value+means+that+it+drops+when%0A++++%2F%2F+the+timeout+expires%2C+releasing+%60LOCK%60+and+fixing+the+deadlock.%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+future1%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...and+also+here%21%22%29%3B%0A%7D>
@@ -112,11 +115,13 @@ async fn main() {
 }
 ```
 
-Now this is starting to look like code someone might actually write. To
-complete the illusion, imagine that `foo`, `bar`, `baz`, and `main` are all
-defined in different crates. The lock is private to `foo`, but `main` doesn't
-depend on `foo` directly. Maybe the author of `main` has never heard of `foo`.
-Who's "at fault" for a deadlock like this?
+This is more realistic. To complete the illusion, imagine that `foo`, `bar`,
+`baz`, and `main` are all defined in different crates. The lock is private to
+`foo`, but `main` doesn't depend on `foo` directly. Maybe the author of `main`
+has never even heard of `foo`. Who's "at fault" for a deadlock like this?
+
+[`.lock()`]: https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html#method.lock
+[`Sleep`]: https://docs.rs/tokio/latest/tokio/time/fn.sleep.html
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
