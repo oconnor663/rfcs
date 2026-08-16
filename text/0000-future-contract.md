@@ -451,6 +451,22 @@ Pausing is fundamentally incompatible with library code that takes locks
 internally, and async Rust has to have an opinion about which of those two
 things we generally support.
 
+### We're calling a _lot_ of existing code broken.
+
+TODO: things that are broken
+
+- `poll!`
+- blanket impls
+- the `futures::future::select` function (not the macro)
+- `FutureExt::shared`
+- `StreamExt::next`
+- concurrent ("buffered") streams
+
+things that are fine
+
+- `timeout`
+- `select!`
+
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
