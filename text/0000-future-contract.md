@@ -141,7 +141,7 @@ not ok.
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-### important new text in the `Future` docs
+### Important new text in the `Future` docs
 
 > This new text is the focus of this whole RFC. It's presented here in
 > isolation, for readers who want to see the important part first and who don't
@@ -151,13 +151,21 @@ The `poll` method also imposes two responsibilities on its caller:
 
 1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
    should **drop the future promptly**. Further calls to `poll` may panic or
-   otherwise misbehave (within the bounds of safe code).
+   otherwise misbehave (within the bounds of safe code).[^exceptions]
 
 2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
    that call is later invoked, and the future hasn't been dropped in the
    meantime, the caller should **`poll` again promptly.**
 
-### expanded `Future` docs
+[^exceptions]: This is how we need to treat generic futures that we don't know
+    anything about. But specific types like [`Fuse`] or [`MaybeDone`], which
+    handle dropping internally and/or tolerate further calls to `poll` after
+    returning `Ready`, can document their exceptions to this rule.
+
+[`MaybeDone`]: https://docs.rs/futures/latest/futures/future/enum.MaybeDone.html
+[`Fuse`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse
+
+### Expanded `Future` docs
 
 > The this section repeats the important text above, but in the context of an
 > an expanded intro to `Future`, the way new learners might encounter it. This
@@ -261,7 +269,7 @@ The `poll` method also imposes two responsibilities on its caller:
 
 1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
    should **drop the future promptly**. Further calls to `poll` may panic or
-   otherwise misbehave (within the bounds of safe code).
+   otherwise misbehave (within the bounds of safe code).[^exceptions]
 
 2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
    that call is later invoked, and the future hasn't been dropped in the
@@ -470,10 +478,31 @@ things that are fine
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-- Why is this design the best in the space of possible designs?
-- What other designs have been considered and what is the rationale for not choosing them?
-- What is the impact of not doing this?
-- If this is a language proposal, could this be done in a library or macro instead? Does the proposed change make Rust code easier or harder to read, understand, and maintain?
+### What's the point of the drop requirement after `Poll::Ready`?
+
+The focus of this RFC is the "`Poll::Pending` rule" about polling again
+promptly after a wakeup, but it also establishes a "`Poll::Ready` rule" about
+dropping a future promptly after it's finished. The benefit of this rule is
+that futures like [`Timeout`] and [`Race`] can contain their child futures
+directly (like they do today), without using `Option`, [`MaybeDone`], or
+similar to represent the state where they drop a child without being dropped
+themselves. Instead, they cancel their children by returning `Ready` and
+trusting that their caller will drop them promptly. In other words, `Timeout`
+and `Race` can rely on the "`Poll::Ready` rule" to guarantee that they follow
+the "`Poll::Pending` rule".
+
+[`Race`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html
+
+Combinators like [`Join`] do need extra state to meet this requirement. When
+one side of a `Join` finishes, it needs to drop that future immediately,
+without waiting for both sides to finish. Luckily, most implementations of
+`Join` do this today too, using `MaybeDone` or similar, because it saves space.
+(`MaybeDone` holds either a future or its output, but not both at the same
+time.) Codifying the "`Poll::Ready` rule" isn't expected to cause any changes
+in the ecosystem, but it clarifies that callees can rely on this behavior for
+correctness.
+
+[`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 
 ## Prior art
 [prior-art]: #prior-art
