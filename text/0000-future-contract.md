@@ -425,39 +425,47 @@ forbidding it at the language level seems quite opinionated.[^forbid]
 
 Similarly, Windows has the [`SuspendThread`] and [`TerminateThread`] functions
 for a reason. Over the years, many applications have wanted to
-non-cooperatively pause or cancel a thread.[^raymond_chen] Sometimes passing a
+non-cooperatively pause or cancel a thread.[^raymond_chen1] Sometimes passing a
 cancel flag throughout a large application is too much trouble, and sometimes
 we're working with Other People's Code that we can't change. However, today we
 understand that these functions ([and their Unix
-equivalents](https://jacko.io/snooze.html#threads)) are _radioactive_ -- using
-them anywhere effectively corrupts the whole process -- and we categorically
-ban them.
+relatives](https://jacko.io/snooze.html#threads)) are _radioactive_. Outside of
+a very short list of very low-level cases, they tend to corrupt the entire
+process.[^raymond_chen2]
 
 [`TerminateThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminatethread
 [`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
 
-[^raymond_chen]: "Originally, there was no `TerminateThread` function. The
+[^raymond_chen1]: "Originally, there was no `TerminateThread` function. The
     original designers felt strongly that no such function should exist because
     there was no safe way to terminate a thread, and there's no point having a
     function that cannot be called safely. But people screamed that they needed
     the `TerminateThread` function, even though it wasn't safe, so the
     operating system designers caved and added the function because people
     demanded it. Of course, those people who insisted that they needed
-    `TerminateThread` now regret having been given it." [- Raymond
-    Chen][raymond_chen]
+    `TerminateThread` now regret having been given it." - [Raymond
+    Chen][raymond_chen1]
 
-[raymond_chen]: https://devblogs.microsoft.com/oldnewthing/20150814-00/?p=91811
+[raymond_chen1]: https://devblogs.microsoft.com/oldnewthing/20150814-00/?p=91811
+
+[^raymond_chen2]: "These results are not specific to C#. The same logic applies
+    to Win32 or any other threading model. In Win32, the process heap is a
+    threadsafe object, and since it's hard to do very much in Win32 at all
+    without accessing the heap, suspending a thread in Win32 has a very high
+    chance of deadlocking your process." - [Raymond Chen][raymond_chen2]
+
+[raymond_chen2]: https://devblogs.microsoft.com/oldnewthing/20031209-00/?p=41573
 
 Async Rust can support cancellation, even though threads can't, because the
 `Drop` machinery knows exactly what locks to release and what memory to free.
 But that's no help when it comes to pausing. Unless we have complete control,
 not only of every line of code we might pause, but also of every other line of
-code we might run before unpausing it, there's no way to know whether we're
+code we might run during the pause, there's no way to know whether we're
 inviting a deadlock. In ["Futurelock"][futurelock], for example, the culprit
 was a semaphore buried in the `tokio::sync::mpsc` channel implementation.
-Pausing is fundamentally incompatible with library code that takes locks
-internally, and async Rust has to have an opinion about which of those two
-things we generally support.
+Pausing is generally incompatible with library code that takes locks
+internally, and the whole ecosystem needs to agree on which of those two things
+is allowed.
 
 ### We're calling a _lot_ of existing code broken.
 
