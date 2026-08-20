@@ -23,51 +23,58 @@ identifies several, but it avoids endorsing specific changes beyond the
 ## Motivation
 [motivation]: #motivation
 
-Cancellation and pausing are unique to async Rust. Regular, synchronous Rust
-doesn't let us kill or suspend threads -- in fact most languages don't, except
-maybe Erlang -- because doing either of those things tends to cause
-deadlocks.[^leak] Async cancellation solves this problem(!) by dropping
-cancelled futures, which automatically releases any locks they're holding. But
-async pausing doesn't solve this problem at all, and it's vulnerable to a
-similar class of deadlocks, including e.g. ["Futurelock"]. This makes pausing
-futures arguably more of a bug than a feature.
+Cancelling or pausing a running function is a unique feature of async Rust.
+Regular, synchronous Rust doesn't let us kill or suspend threads, because doing
+either of those things tends to cause deadlocks.[^deprecated] Async
+cancellation solves this problem(!) by dropping cancelled futures, which
+automatically releases any locks they're holding. But async pausing doesn't
+solve this problem at all, and in fact it's vulnerable to a similar class of
+deadlocks, for example ["Futurelock"]. This makes pausing futures arguably more
+of a bug than a feature.
 
-[^leak]: Some languages _used to_ support cancelling threads but later
-    [deprecated those APIs][deprecated]. The underlying problem is that the OS
-    doesn't know what resources a thread owns. If we make an unsafe FFI call to
-    [`pthread_cancel`] or [`TerminateThread`] to kill a thread in Rust, we end
-    up leaking everything, including the lock guards. Garbage-collected do
-    better with freeing memory, but usually not with locks. Pausing a thread
-    doesn't leak anything per se, but if the paused thread is holding a lock,
-    and the thread that's supposed to unpause it touches the same lock in the
-    meantime, we get similar deadlocks.
+[^deprecated]: Lots of languages have old APIs for killing or suspending
+    threads that were added before these issues were well understood. Most of
+    these are now deprecated ([Java][java], [C#][c_sharp], [Python][python]).
+    The fundamental problem is that killing a thread doesn't respect
+    language-level cleanup constructs like `try`/`finally` or destructors. GC
+    languages can free memory later, but they still break invariants like
+    "always release this lock before returning". Non-GC languages like Rust
+    just leak everything, including lock guards. Pausing a thread doesn't leak
+    anything per se, but if the paused thread is holding a lock, and the thread
+    that's supposed to unpause it touches the same lock in the meantime, we get
+    similar deadlocks.
 
-[deprecated]: https://docs.oracle.com/javase/8/docs/technotes/guides/concurrency/threadPrimitiveDeprecation.html
+[java]: https://docs.oracle.com/javase/8/docs/technotes/guides/concurrency/threadPrimitiveDeprecation.html
+[c_sharp]: https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/5.0/thread-abort-obsolete
+[python]: https://docs.python.org/3/c-api/threads.html#c.PyThread_exit_thread
 
 Another quirk of async pausing is that, although we almost never do it
 explicitly,[^dioxus] we often do it implicitly, and it's surprisingly easy to
 do it _accidentally_. "Futurelock" was caused by unintended pausing in a
 [`select!`], and async streams have been [battling pausing bugs][barbara] for
-years. We'd like treat this problem at the root, but unfortunately that isn't
-as simple as banning a few specific functions. On the other hand, fortunately,
-there's nothing wrong with the `Future` trait itself. The main fix here, and
-the only specific change included in this RFC, is clarifying the `Future`
-contract in the standard library docs. The expectation is that some of the
+years. Ideally we'd treat this problem at the root and ban pausing futures
+entirely, but that's not as simple as deprecating a few specific functions.
+
+Fortunately, the `Future` trait itself doesn't need to change. The main fix
+here, and the only specific change required by this RFC, is clarifying the
+`Future` contract in the standard library docs. The expectation is that some
 follow-up changes to conform to the new/clarified contract will be big enough
 to merit RFCs of their own, or at least substantial experiments in the
-ecosystem, and this RFC tries to avoid litigating the details of every case.
-(In particular, the `AsyncIterator` question is deferred to RFC #TODO.)
+ecosystem, and we'd like to build consensus on the root cause without
+litigating every downstream design decision. (In particular, the
+[`AsyncIterator`] question is deferred to RFC #TODO.)
 
-Let's look at one of these deadlocks. We'll start with a minimal, contrived
-example, and we'll gradually expand it into code that someone might actually
-write. Then we'll look at the low level details and talk about where exactly
-things start going wrong. Here's the minimal example ([playground link][foo1]):
+Let's look at an example deadlock to get a sense of what we're talking about
+here. We'll start with a minimal, contrived example and gradually expand it
+into something more realistic. Then we'll talk about the low-level details and
+pinpoint where exactly things go wrong. Here's the minimal example ([playground
+link][foo1]):
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
     automatically][dioxus_src].
 
-[dioxus_docs]: https://docs.rs/dioxus/0.7.10/dioxus/prelude/struct.UseFuture.html
+[dioxus_docs]: https://docs.rs/dioxus/0.7.10/dioxus/prelude/struct.UseFuture.html#method.pause
 [dioxus_src]: https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/hooks/src/use_future.rs#L63-L72
 
 [foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+future1+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28future1%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
@@ -617,3 +624,4 @@ TODO: `AsyncIterator`
 [`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
 [snooze]: https://jacko.io/snooze.html
 [`select!`]: https://docs.rs/tokio/latest/tokio/macro.select.html
+[`AsyncIterator`]: https://doc.rust-lang.org/core/async_iter/trait.AsyncIterator.html
