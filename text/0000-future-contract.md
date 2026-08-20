@@ -177,6 +177,24 @@ not ok.
 
 TODO: finish this section
 
+[`join_maybe` playground][join_maybe]
+
+[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CLeft%3A+Future%2C+Right%3A+Future%3E%28left%3A+Left%2C+right%3A+Right%29+-%3E+JoinMaybe%3CLeft%2C+Right%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++left%2C%0A++++++++right%3A+MaybeDone%3A%3AFuture%28right%29%2C%0A++++%7D%0A%7D%0A%0Apin_project_lite%3A%3Apin_project%21+%7B%0A++++struct+JoinMaybe%3CLeft%3A+Future%2C+Right%3A+Future%3E+%7B%0A++++++++%23%5Bpin%5D%0A++++++++left%3A+Left%2C%0A++++++++%23%5Bpin%5D%0A++++++++right%3A+MaybeDone%3CRight%3E%2C%0A++++%7D%0A%7D%0A%0Aimpl%3CLeft%3A+Future%2C+Right%3A+Future%3E+Future+for+JoinMaybe%3CLeft%2C+Right%3E+%7B%0A++++type+Output+%3D+%28Left%3A%3AOutput%2C+Option%3CRight%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+mut+this+%3D+self.project%28%29%3B%0A++++++++let+left_poll+%3D+this.left.poll%28cx%29%3B%0A++++++++_+%3D+this.right.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28left_output%29+%3D+left_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28left_output%2C+this.right.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+background_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+background_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
+
+```rust
+#[tokio::main]
+async fn main() {
+    // While `bar` is running, call `baz` every 5 ms.
+    let background_loop = async {
+        loop {
+            sleep(Duration::from_millis(5)).await;
+            baz().await;
+        }
+    };
+    join_maybe(bar(), background_loop).await;
+}
+```
+
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
