@@ -522,6 +522,10 @@ things that are fine
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
+### Can we enforce the `Future` contract programmatically?
+
+TODO: Yes.
+
 ### What's the point of the drop requirement after `Poll::Ready`?
 
 The focus of this RFC is the "`Poll::Pending` rule" about polling again
