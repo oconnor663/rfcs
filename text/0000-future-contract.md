@@ -22,15 +22,42 @@ RFC identifies several, but it avoids endorsing specific changes beyond the
 ## Motivation
 [motivation]: #motivation
 
-Cancellation is a well-established if under-documented feature of async Rust.
-But it has an obscure cousin that's not documented at all, and maybe not even a
-feature, what we might call "pausing" (complimentary) or "snoozing"
-(pejorative). Pausing is almost never explicit,[^dioxus] but it's common and
-surprisingly easy to snooze a future _implicitly_. This can cause hangs and
-deadlocks, most famously ["Futurelock"][futurelock]. Let's look at a minimal
-example of one of these deadlocks, and then gradually expand it into code
-someone might actually write. Here's the minimal example ([playground
-link][foo1]):
+Cancellation and pausing are special powers of async Rust that regular,
+synchronous Rust doesn't have. Rust doesn't support killing or suspending
+threads -- in fact most languages don't, except maybe Erlang -- because doing
+either of those things tends to cause deadlocks.[^leak] Async cancellation
+solves this problem by dropping cancelled futures, which automatically releases
+any locks they're holding. On the other hand, async pausing doesn't actually
+solve this problem at all. It's vulnerable to a similar class of deadlocks, of
+which ["Futurelock"] was a recent, prominent example. This makes pausing more
+of a bug than a feature.
+
+[^leak]: Some languages _used to_ support cancelling threads but later
+    [deprecated those APIs][deprecated]. The underlying problem is that the OS
+    doesn't know what resources a thread owns. If we make an unsafe FFI call to
+    [`pthread_cancel`] or [`TerminateThread`] to kill a thread in Rust, we end
+    up leaking everything, including the lock guards. Garbage-collected
+    languages get some leeway with freeing memory, but they don't usually do
+    any better with locks. Pausing threads doesn't leak anything per se, but if
+    a paused thread is holding a lock, and the thread that's supposed to
+    unpause it touches the same lock in the meantime, we get similar deadlocks.
+
+[deprecated]: https://docs.oracle.com/javase/8/docs/technotes/guides/concurrency/threadPrimitiveDeprecation.html
+
+Another quirk of async pausing is that, although we almost never do it
+explicitly,[^dioxus] it's common to do it implicitly and surprisingly easy to
+do it _accidentally_. Unintended pausing in a [`select!`] statement is what
+caused "Futurelock", and async streams have been [battling pausing
+bugs][barbara] for years. We'd like to root out this whole problem, but
+unfortunately it isn't as simple as banning a few specific functions. On the
+other hand, fortunately, there's nothing wrong with the `Future` trait itself.
+The main fix here, and the only specific change in this RFC, to clarify the
+`Future` contract in the docs.
+
+Let's look at one of these deadlocks. We'll start with a minimal, contrived
+example, and we'll gradually expand it into code that someone might actually
+write. Then we'll look at the low level details and talk about where exactly
+things start going wrong. Here's the minimal example ([playground link][foo1]):
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
@@ -64,13 +91,12 @@ so the result is a deadlock.
 
 [`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
 
-It's worth looking at this sequence of events in finer detail, and we'll do
-that below, but first let's see how this situation can come up in normal code.
-`poll!` is a relatively obscure macro, so we'll replace it with something more
-realistic. The most common future snoozer in practice is [`select!`], which is
-how ["Futurelock"][futurelock] did it, but `select!` is a bit complicated, and
-this problem isn't specific to macros. Let's use [`timeout`] ([playground
-link][foo2]):
+We'll talk through the sequence of events in detail below, but first let's see
+how this situation can come up in normal code. `poll!` is a relatively obscure
+macro, so we'll replace it with something more realistic. The most common
+culprit in practice is [`select!`], which is how ["Futurelock"] did it, but
+`select!` is a bit complicated, and this problem isn't specific to macros.
+Let's use [`timeout`] ([playground link][foo2]):
 
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
@@ -137,6 +163,8 @@ not ok.
 
 [^slack]: Tokio's timer implementation adds ~1 ms of slack to our 5 ms timeout
     and our 10 ms sleep.
+
+TODO: finish this section
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -433,9 +461,6 @@ relatives](https://jacko.io/snooze.html#threads)) are _radioactive_. Outside of
 a very short list of very low-level cases, they tend to corrupt the entire
 process.[^raymond_chen2]
 
-[`TerminateThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminatethread
-[`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
-
 [^raymond_chen1]: "Originally, there was no `TerminateThread` function. The
     original designers felt strongly that no such function should exist because
     there was no safe way to terminate a thread, and there's no point having a
@@ -461,7 +486,7 @@ Async Rust can support cancellation, even though threads can't, because the
 But that's no help when it comes to pausing. Unless we have complete control,
 not only of every line of code we might pause, but also of every other line of
 code we might run during the pause, there's no way to know whether we're
-inviting a deadlock. In ["Futurelock"][futurelock], for example, the culprit
+inviting a deadlock. In ["Futurelock"], for example, the culprit
 was a semaphore buried in the `tokio::sync::mpsc` channel implementation.
 Pausing is generally incompatible with library code that takes locks
 internally, and the whole ecosystem needs to agree on which of those two things
@@ -515,19 +540,7 @@ correctness.
 ## Prior art
 [prior-art]: #prior-art
 
-Discuss prior art, both the good and the bad, in relation to this proposal.
-A few examples of what this can include are:
-
-- For language, library, cargo, tools, and compiler proposals: Does this feature exist in other programming languages and what experience have their community had?
-- For community proposals: Is this done by some other community and what were their experiences with it?
-- For other teams: What lessons can we learn from what other communities have done here?
-- Papers: Are there any published papers or great posts that discuss this? If you have some relevant papers to refer to, this can serve as a more detailed theoretical background.
-
-This section is intended to encourage you as an author to think about the lessons from other languages, provide readers of your RFC with a fuller picture.
-If there is no prior art, that is fine - your ideas are interesting to us whether they are brand new or if it is an adaptation from other languages.
-
-Note that while precedent set by other languages is some motivation, it does not on its own motivate an RFC.
-Please also take into consideration that rust sometimes intentionally diverges from common language features.
+TODO
 
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
@@ -589,24 +602,12 @@ since the requirement is the same.
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
-Think about what the natural extension and evolution of your proposal would
-be and how it would affect the language and project as a whole in a holistic
-way. Try to use this section as a tool to more fully consider all possible
-interactions with the project and language in your proposal.
-Also consider how this all fits into the roadmap for the project
-and of the relevant sub-team.
+TODO
 
-This is also a good place to "dump ideas", if they are out of scope for the
-RFC you are writing but otherwise related.
-
-If you have tried and cannot think of any future possibilities,
-you may simply state that you cannot think of anything.
-
-Note that having something written down in the future-possibilities section
-is not a reason to accept the current or a future RFC; such notes should be
-in the section on motivation or rationale in this or subsequent RFCs.
-The section merely provides additional information.
-
-[futurelock]: https://rfd.shared.oxide.computer/rfd/0609
+[barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
+["Futurelock"]: https://rfd.shared.oxide.computer/rfd/0609
+[`pthread_cancel`]: https://man7.org/linux/man-pages/man3/pthread_cancel.3.html
+[`TerminateThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminatethread
+[`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
 [snooze]: https://jacko.io/snooze.html
 [`select!`]: https://docs.rs/tokio/latest/tokio/macro.select.html
