@@ -51,7 +51,7 @@ caused "Futurelock", and async streams have been [battling pausing
 bugs][barbara] for years. We'd like to root out this whole problem, but
 unfortunately it isn't as simple as banning a few specific functions. On the
 other hand, fortunately, there's nothing wrong with the `Future` trait itself.
-The main fix here, and the only specific change in this RFC, to clarify the
+The main fix here, and the only specific change in this RFC, is to clarify the
 `Future` contract in the docs.
 
 Let's look at one of these deadlocks. We'll start with a minimal, contrived
@@ -148,7 +148,7 @@ has never even heard of `foo`. Who's "at fault" for a deadlock like this?
 
 Let's look more closely at the sequence of events. If we [add some
 prints][squawk], we can see that `main` gets polled three times. The first
-wakeup is at 0 ms is when control first enters `main`, the second is at 5-6 ms
+wakeup is at 0 ms when control first enters `main`, the second is at 5-6 ms
 when the `timeout` expires, and the third is at 10-11 ms when the `sleep` in
 `bar` (that is, in `foo`) completes.[^slack] Control in `main` is in the
 `baz().await` expression at that point, so the `baz` future gets polled again,
@@ -195,11 +195,11 @@ The `poll` method also imposes two responsibilities on its caller:
 
 ### Expanded `Future` docs
 
-> The this section repeats the important text above, but in the context of an
-> an expanded intro to `Future`, the way new learners might encounter it. This
-> is both to avoid presenting the important part entirely in a vacuum, and also
-> to make this RFC slightly more accessible to folks who haven't written a ton
-> of async Rust.
+> This section repeats the important text above, but in the context of an an
+> expanded intro to `Future`, the way new learners might encounter it. This is
+> both to avoid presenting the important part entirely in a vacuum, and also to
+> make this RFC slightly more accessible to folks who haven't written a ton of
+> async Rust.
 
 A future represents a possibly-ongoing asynchronous computation and the value
 it might eventually return. The most common way to create a future is to call
@@ -245,17 +245,17 @@ impl Future for AddOne {
     }
 }
 
-fn add_one(Foox: u32) -> AddOne {
+fn add_one(x: u32) -> AddOne {
     AddOne(x)
 }
 
 assert_eq!(add_one(42).await, 43);
 ```
 
-This version of `add_one` explicitly returns a `AddOne` future. It behaves like
-an `async fn`, and we call it and `.await` it the same way. Implementing the
-`Future` trait is what makes `AddOne` a future, and the core of the `Future`
-trait is the `poll` method.
+This version of `add_one` explicitly returns an `AddOne` future. It behaves
+like an `async fn`, and we call it and `.await` it the same way. Implementing
+the `Future` trait is what makes `AddOne` a future, and the core of the
+`Future` trait is the `poll` method.
 
 #### The `poll` method
 
@@ -432,14 +432,14 @@ fn`.[^noncoop] That's probably not the best architecture, but effectively
 forbidding it at the language level seems quite opinionated.[^forbid]
 
 [^noncoop]: "Cooperative" vs "non-cooperative" has a couple different
-    interpretations in async Rust. From the perspective an executor thread
+    interpretations in async Rust. From the perspective of an executor thread
     that's calling `Future::poll`, everything is cooperative, because we can't
-    force that function to to ever return. On the other hand, a `poll` function
+    force that function to ever return. On the other hand, a `poll` function
     that doesn't return promptly is gumming up the executor, and we have [tools
     for finding those][slow_poll]. If we take it for granted that every buggy
     `poll` function eventually gets fixed, then we could think of cancellation
     in async Rust as _non_-cooperative, in that there's nothing an `async fn`
-    can legally do prevent it or delay it for very long.
+    can legally do to prevent it or delay it for very long.
 
 [slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
 
@@ -516,9 +516,9 @@ things that are fine
 The focus of this RFC is the "`Poll::Pending` rule" about polling again
 promptly after a wakeup, but it also establishes a "`Poll::Ready` rule" about
 dropping a future promptly after it's finished. The benefit of this rule is
-that futures like [`Timeout`] and [`Race`] can contain their child futures
-directly (like they do today), without using `Option`, [`MaybeDone`], or
-similar to represent the state where they drop a child without being dropped
+that futures like [`Timeout`][`timeout`] and [`Race`] can contain their child
+futures directly (like they do today), without using `Option`, [`MaybeDone`],
+or similar to represent the state where they drop a child without being dropped
 themselves. Instead, they cancel their children by returning `Ready` and
 trusting that their caller will drop them promptly. In other words, `Timeout`
 and `Race` can rely on the "`Poll::Ready` rule" to guarantee that they follow
