@@ -602,7 +602,9 @@ since the requirement is the same.
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
-TODO
+TODO: linting on the blanket impl, new macros
+
+TODO: `AsyncIterator`
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 ["Futurelock"]: https://rfd.shared.oxide.computer/rfd/0609
