@@ -23,14 +23,14 @@ identifies several, but it avoids endorsing specific changes beyond the
 ## Motivation
 [motivation]: #motivation
 
-Cancelling or pausing a running function is a unique feature of async Rust.
-Regular, synchronous Rust doesn't let us kill or suspend threads, because doing
-either of those things tends to cause deadlocks.[^deprecated] Async
-cancellation solves this problem(!) by dropping cancelled futures, which
-automatically releases any locks they're holding. But async pausing doesn't
-solve this problem at all, and in fact it's vulnerable to a similar class of
-deadlocks, for example ["Futurelock"]. This makes pausing futures arguably more
-of a bug than a feature.
+Cancellation and pausing are distinct features of async Rust. Regular,
+synchronous Rust doesn't let us kill or suspend threads, because doing either
+of those things tends to cause deadlocks.[^deprecated] Async cancellation
+solves this problem(!) by dropping cancelled futures, which automatically
+releases any locks they might be holding. But async pausing does not solve this
+problem, and in fact it's vulnerable to a similar class of deadlocks, for
+example ["Futurelock"]. This makes pausing futures arguably more of a bug than
+a feature.
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
     threads that were added before these issues were well understood. Most of
@@ -455,40 +455,25 @@ promptly.
 
 ### Pausing things is useful, and it would've been nice to allow it.
 
-A video player with a pause button or an RPG with a time-stop spell might want
-to try implementing those things by non-cooperatively pausing some `async
-fn`.[^noncoop] That's probably not the best architecture, but effectively
-forbidding it at the language level seems quite opinionated.[^forbid]
+Some applications might want to pause low-priority work when load is high.
+Others might have an actual pause button (e.g. games, media) that they'd like
+to implement by pausing futures. Those might not be our recommended
+architectural choices, but effectively forbidding them at the language level
+seems quite opinionated.[^forbid]
 
-[^noncoop]: "Cooperative" vs "non-cooperative" has a couple different
-    interpretations in async Rust. From the perspective of an executor thread
-    that's calling `Future::poll`, everything is cooperative, because we can't
-    force that function to ever return. On the other hand, a `poll` function
-    that doesn't return promptly is gumming up the executor, and we have [tools
-    for finding those][slow_poll]. If we take it for granted that every buggy
-    `poll` function eventually gets fixed, then we could think of cancellation
-    in async Rust as _non_-cooperative, in that there's nothing an `async fn`
-    can legally do to prevent it or delay it for very long.
+[^forbid]: Of course an application can ultimately do whatever it likes,
+    including pausing futures or killing threads. Part of what's at stake here
+    is the question of who's "at fault" when such an application collides with
+    a library ecosystem that uses locks.
 
-[slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
-
-[^forbid]: Of course applications can do whatever they like, and some might
-    "alter the deal" with the `Future` and define their own pausing primitives.
-    They wouldn't even need `unsafe` code to do that, just trait
-    implementations and (if this RFC gets its way) maybe suppressing some
-    Clippy lints. In a sense, what's at stake here is the question of who's at
-    fault when such an application collides with a library ecosystem that uses
-    private async locks.
-
-Similarly, Windows has the [`SuspendThread`] and [`TerminateThread`] functions
-for a reason. Over the years, many applications have wanted to
-non-cooperatively pause or cancel a thread.[^raymond_chen1] Sometimes passing a
-cancel flag throughout a large application is too much trouble, and sometimes
-we're working with Other People's Code that we can't change. However, today we
-understand that these functions ([and their Unix
-relatives](https://jacko.io/snooze.html#threads)) are _radioactive_. Outside of
-a very short list of very low-level cases, they tend to corrupt the entire
-process.[^raymond_chen2]
+Similarly, Windows has [`SuspendThread`] and [`TerminateThread`], and Unix has
+[`pthread_cancel`], because many applications over the years have wanted to
+non-cooperatively pause or cancel running threads.[^raymond_chen1] That's
+understandable; passing a cancel flag around everywhere is inconvenient at
+best, and it can be impossible when we're working with other people's code.
+However, today we understand that these functions are _radioactive_. Outside of
+a short list of low-level use cases, they tend to corrupt the entire
+process.[^raymond_chen2] We generally ban them.
 
 [^raymond_chen1]: "Originally, there was no `TerminateThread` function. The
     original designers felt strongly that no such function should exist because
@@ -510,16 +495,38 @@ process.[^raymond_chen2]
 
 [raymond_chen2]: https://devblogs.microsoft.com/oldnewthing/20031209-00/?p=41573
 
-Async Rust can support cancellation, even though threads can't, because the
-`Drop` machinery knows exactly what locks to release and what memory to free.
-But that's no help when it comes to pausing. Unless we have complete control,
-not only of every line of code we might pause, but also of every other line of
-code we might run during the pause, there's no way to know whether we're
-inviting a deadlock. In ["Futurelock"], for example, the culprit
-was a semaphore buried in the `tokio::sync::mpsc` channel implementation.
-Pausing is generally incompatible with library code that takes locks
-internally, and the whole ecosystem needs to agree on which of those two things
-is allowed.
+Unfortunately, pausing futures in async Rust has all the same problems. Taking
+an async lock is far less common than e.g. calling `malloc`, so the symptoms
+aren't as noticeable today, but they'll get worse as the ecosystem grows and
+private locks appear in more places. In [the original "Futurelock"
+incident][incident], for example, the culprit was a semaphore buried in the
+`tokio::sync::mpsc` channel implementation. The channel in question wasn't even
+visible at the point where pausing happened. The non-local nature of these bugs
+is part of why we need to have an opinion about pausing at the
+language/ecosystem level.
+
+[incident]: https://github.com/oxidecomputer/omicron/issues/9259
+
+Given all that, it's remarkable that non-cooperative[^noncoop] cancellation
+works as well as it does in async Rust. It [has its
+issues][cancelling_async_rust], but it doesn't generally cause deadlocks, and
+many applications use selects and timeouts routinely in production. That's
+quite an achievement, and perhaps an unexpected benefit of destructor-based
+cleanup and by extension the borrow checker.
+
+[^noncoop]: "Cooperative" vs "non-cooperative" has a couple different
+    interpretations here. From the perspective of an executor thread that's
+    calling `Future::poll`, everything is cooperative, because we can't force
+    that function to ever return. On the other hand, a `poll` function that
+    doesn't return promptly is gumming up the executor, and we have [tools for
+    finding those][slow_poll]. If we take it for granted that every long `poll`
+    bug eventually gets fixed, then we could think of cancellation in async
+    Rust as _non_-cooperative. There's nothing a correct `async fn` can do to
+    prevent it or delay it for very long.
+
+[slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
+
+[cancelling_async_rust]: https://sunshowers.io/posts/cancelling-async-rust/
 
 ### We're calling a _lot_ of existing code broken.
 
