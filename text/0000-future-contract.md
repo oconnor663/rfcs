@@ -13,10 +13,12 @@ should never "pause" a future.
 
 [`Future::poll`]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
-There are widely used patterns in async Rust that violate this new/clarified
-rule, including [`select!`]-by-reference and [`StreamExt::next`]. This RFC
-identifies several, but it avoids endorsing specific changes beyond the
-`Future` docs.
+There are widely used patterns that violate this rule, including
+[`select!`]-by-reference and [`StreamExt::next`]. This RFC identifies several,
+but it avoids endorsing specific changes beyond the `Future` docs. The goal is
+to agree that these contract violations are bugs and that we can and should
+eventually fix them. Deciding how to fix or replace each problematic pattern is
+deferred to follow-up RFCs and/or the crates ecosystem.
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 
@@ -26,49 +28,37 @@ identifies several, but it avoids endorsing specific changes beyond the
 Cancellation and pausing are distinct features of async Rust. Regular,
 synchronous Rust doesn't let us kill or suspend threads, because doing either
 of those things tends to cause deadlocks.[^deprecated] Async cancellation
-solves this problem(!) by dropping cancelled futures, which automatically
-releases any locks they might be holding. But async pausing does not solve this
-problem, and in fact it's vulnerable to a similar class of deadlocks, for
-example ["Futurelock"]. This makes pausing futures arguably more of a bug than
-a feature.
+solves the deadlock problem(!) by dropping cancelled futures, which
+automatically releases any locks they might be holding. But async pausing
+doesn't solve the deadlock problem at all, and that makes it arguably more of a
+bug than a feature. For a case study of how confusing and non-local these
+things can be in practice, see ["Futurelock"] (Oxide, October 2025).
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
-    threads that were added before these issues were well understood. Most of
-    these are now deprecated ([Java][java], [C#][c_sharp], [Python][python]).
-    The fundamental problem is that killing a thread doesn't respect
-    language-level cleanup constructs like `try`/`finally` or destructors. GC
-    languages can free memory later, but they still break invariants like
-    "always release this lock before returning". Non-GC languages like Rust
-    just leak everything, including lock guards. Pausing a thread doesn't leak
-    anything per se, but if the paused thread is holding a lock, and the thread
-    that's supposed to unpause it touches the same lock in the meantime, we get
+    threads that are now deprecated ([Java][java], [C#][c_sharp],
+    [Python][python]). The fundamental problem is that killing threads doesn't
+    respect language-level cleanup constructs like `try`/`finally` or
+    destructors. If we kill a thread in Rust, we leak everything that thread
+    owned, including lock guards. Pausing a thread doesn't leak anything per
+    se, but if the paused thread is holding a lock, and the thread that's
+    supposed to unpause it touches the same lock in the meantime, we get
     similar deadlocks.
 
 [java]: https://docs.oracle.com/javase/8/docs/technotes/guides/concurrency/threadPrimitiveDeprecation.html
 [c_sharp]: https://learn.microsoft.com/en-us/dotnet/core/compatibility/core-libraries/5.0/thread-abort-obsolete
 [python]: https://docs.python.org/3/c-api/threads.html#c.PyThread_exit_thread
 
-Another quirk of async pausing is that, although we almost never do it
+Another problem with async pausing is that, although we almost never do it
 explicitly,[^dioxus] we often do it implicitly, and it's surprisingly easy to
-do it _accidentally_. "Futurelock" was caused by unintended pausing in a
-[`select!`], and async streams have been [battling pausing bugs][barbara] for
-years. Ideally we'd treat this problem at the root and ban pausing futures
-entirely, but that's not as simple as deprecating a few specific functions.
+do it accidentally. "Futurelock" was caused by unintended pausing in a
+[`select!`] loop, and async streams have been [battling pausing bugs][barbara]
+for years. These mistakes are invisible unless you know exactly what you're
+looking for.
 
-Fortunately, the `Future` trait itself doesn't need to change. The main fix
-here, and the only specific change required by this RFC, is clarifying the
-`Future` contract in the standard library docs. The expectation is that some
-follow-up changes to conform to the new/clarified contract will be big enough
-to merit RFCs of their own, or at least substantial experiments in the
-ecosystem, and we'd like to build consensus on the root cause without
-litigating every downstream design decision. (In particular, the
-[`AsyncIterator`] question is deferred to RFC #TODO.)
-
-Let's look at an example deadlock to get a sense of what we're talking about
-here. We'll start with a minimal, contrived example and gradually expand it
-into something more realistic. Then we'll talk about the low-level details and
-pinpoint where exactly things go wrong. Here's the minimal example ([playground
-link][foo1]):
+Let's look at an example deadlocks, to get a sense of how things go wrong and
+where we might be able to intervene. We'll start with a minimal, contrived
+example and gradually expand it into something more realistic. Here's the
+minimal version ([playground link][foo1]):
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
@@ -538,6 +528,7 @@ TODO: things that are broken
 - `FutureExt::shared`
 - `StreamExt::next`
 - concurrent ("buffered") streams
+- `LocalSet::run_until` ?
 
 things that are fine
 
