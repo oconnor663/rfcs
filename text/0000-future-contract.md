@@ -17,8 +17,8 @@ There are widely used patterns that violate this rule, including
 [`select!`]-by-reference and [`StreamExt::next`]. This RFC identifies several,
 but it avoids endorsing specific changes beyond the `Future` docs. The goal is
 to agree that these contract violations are bugs and that we can and should fix
-them, but deciding out how exactly to fix or replace each problematic pattern
-is deferred to follow-up RFCs and/or the crates ecosystem.
+them, but deciding how exactly to fix or replace each problematic pattern is
+deferred to follow-up RFCs and/or the crates ecosystem.
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 
@@ -31,7 +31,7 @@ of those things tends to cause deadlocks.[^deprecated] Async cancellation
 solves the deadlock problem(!) by dropping cancelled futures, which
 automatically releases any locks they might be holding. But async pausing
 doesn't solve the deadlock problem, and that makes it arguably more of a bug
-than a feature. For a case study of how confusing and non-local these deadlocks
+than a feature. For a case study in how confusing and non-local these deadlocks
 can be in practice, see ["Futurelock"] (Oxide, October 2025).
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
