@@ -16,9 +16,9 @@ should never "pause" a future.
 There are widely used patterns that violate this rule, including
 [`select!`]-by-reference and [`StreamExt::next`]. This RFC identifies several,
 but it avoids endorsing specific changes beyond the `Future` docs. The goal is
-to agree that these contract violations are bugs and that we can and should
-eventually fix them. Deciding how to fix or replace each problematic pattern is
-deferred to follow-up RFCs and/or the crates ecosystem.
+to agree that these contract violations are bugs and that we can and should fix
+them, but deciding out how exactly to fix or replace each problematic pattern
+is deferred to follow-up RFCs and/or the crates ecosystem.
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 
@@ -30,9 +30,9 @@ synchronous Rust doesn't let us kill or suspend threads, because doing either
 of those things tends to cause deadlocks.[^deprecated] Async cancellation
 solves the deadlock problem(!) by dropping cancelled futures, which
 automatically releases any locks they might be holding. But async pausing
-doesn't solve the deadlock problem at all, and that makes it arguably more of a
-bug than a feature. For a case study of how confusing and non-local these
-things can be in practice, see ["Futurelock"] (Oxide, October 2025).
+doesn't solve the deadlock problem, and that makes it arguably more of a bug
+than a feature. For a case study of how confusing and non-local these deadlocks
+can be in practice, see ["Futurelock"] (Oxide, October 2025).
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
     threads that are now deprecated ([Java][java], [C#][c_sharp],
@@ -55,10 +55,10 @@ do it accidentally. "Futurelock" was caused by unintended pausing in a
 for years. These mistakes are invisible unless you know exactly what you're
 looking for.
 
-Let's look at an example deadlocks, to get a sense of how things go wrong and
-where we might be able to intervene. We'll start with a minimal, contrived
-example and gradually expand it into something more realistic. Here's the
-minimal version ([playground link][foo1]):
+Let's look at an example to get a sense of how things go wrong and where we
+might be able to intervene. We'll start with something minimal and contrived,
+and gradually expand it into something more realistic. Here's the minimal
+version ([playground link][foo1]):
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
