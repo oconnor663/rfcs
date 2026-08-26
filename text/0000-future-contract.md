@@ -444,6 +444,44 @@ promptly.
 ## Drawbacks
 [drawbacks]: #drawbacks
 
+### A _lot_ of existing code breaks the "`Poll::Pending` rule"
+
+There are many patterns that currently violate the "`Poll::Pending` rule", and
+we can come up with a version of the the deadlock in the "Motivation" section
+for each of them. This RFC doesn't attempt to decide how each case should be
+fixed, but see the "Future possibilities" section for possible approaches.
+
+- `poll!`
+- blanket impls
+- the `futures::future::select` function (not the macro)
+- `StreamExt::next`
+- concurrent ("buffered") streams
+- `FutureExt::shared`
+- `LocalSet::run_until` ?
+
+things that are fine
+
+- `timeout`
+- `select!`
+
+#### `select!` by reference
+
+The `timeout` example in the "Motivation" is a little bit easier to understand
+than this [`select!`] version, but the `select!` version is more common
+([playground link][select_deadlock]):
+
+[select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+foo_future+%3D+pin%21%28foo%28%29%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++_+%3D+%26mut+foo_future+%3D%3E+%7B%7D%2C%0A++++++++++++_+%3D+sleep%28Duration%3A%3Afrom_millis%281%29%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++++++foo%28%29.await%3B%0A++++++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++++++%7D%2C%0A++++++++%7D%0A++++%7D%0A%7D>
+
+```rust
+let mut foo_future = pin!(foo());
+loop {
+    select! {
+        _ = &mut foo_future => {},
+        _ = sleep(Duration::from_millis(1)) => foo().await, // Deadlock!
+    }
+}
+```
+
 ### Pausing things is useful, and it would've been nice to allow it.
 
 Some applications might want to pause low-priority work when load is high.
@@ -518,23 +556,6 @@ cleanup and by extension the borrow checker.
 [slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
 
 [cancelling_async_rust]: https://sunshowers.io/posts/cancelling-async-rust/
-
-### We're calling a _lot_ of existing code broken.
-
-TODO: things that are broken
-
-- `poll!`
-- blanket impls
-- the `futures::future::select` function (not the macro)
-- `FutureExt::shared`
-- `StreamExt::next`
-- concurrent ("buffered") streams
-- `LocalSet::run_until` ?
-
-things that are fine
-
-- `timeout`
-- `select!`
 
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
