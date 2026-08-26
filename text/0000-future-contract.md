@@ -549,7 +549,7 @@ The focus of this RFC is the "`Poll::Pending` rule" about polling again
 promptly after a wakeup, but it also establishes a "`Poll::Ready` rule" about
 dropping a future promptly after it's finished. The benefit of this rule is
 that futures like [`Timeout`][`timeout`] and [`Race`] can contain their child
-futures directly (like they do today), without using `Option`, [`MaybeDone`],
+futures directly (like they do today), without needing `Option`, [`MaybeDone`],
 or similar to represent the state where they drop a child without being dropped
 themselves. Instead, they cancel their children by returning `Ready` and
 trusting that their caller will drop them promptly. In other words, `Timeout`
@@ -561,10 +561,10 @@ the "`Poll::Pending` rule".
 Combinators like [`Join`] do need extra state to meet this requirement. When
 one side of a `Join` finishes, it needs to drop that future immediately,
 without waiting for both sides to finish. Luckily, most implementations of
-`Join` do this today too, using `MaybeDone` or similar, because it saves space.
-(`MaybeDone` holds either a future or its output, but not both at the same
-time.) Codifying the "`Poll::Ready` rule" isn't expected to cause any changes
-in the ecosystem, but it clarifies that callees can rely on this behavior for
+`Join` already do this today, using `MaybeDone` or similar, because it saves
+space. (`MaybeDone` holds either a future or its output, but not both at the
+same time.) Codifying the "`Poll::Ready` rule" isn't expected to require any
+extra code changes, but it clarifies that callees can rely on the rule for
 correctness.
 
 [`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
@@ -577,7 +577,7 @@ TODO
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
 
-### Should we allow a delay (e.g. another `.await`) between creation and polling?
+### Should we allow an indefinite delay between creation and polling?
 
 In other words, should the following be allowed, or should it e.g. fail Clippy?
 
@@ -588,12 +588,12 @@ future1.await;
 future2.await;
 ```
 
-We could say that `future2` is snoozed here across the first await. On the
-other hand, `future2` has never been polled (or even pinned), and it's not
-likely to be holding any exclusive resources in its initial state. We could
-imagine giving `foo` e.g. a `MutexGuard` argument, but in that case the caller
-could clearly see what's going on. To create a true "nonlocal reasoning"
-problem, we'd need to write `foo` in a sync-then-async style, like this:
+We could say that `future2` is paused here across the first await. On the other
+hand, `future2` has never been polled (or even pinned), and it's not likely to
+be holding any exclusive resources in its initial state. We could imagine
+giving `foo` e.g. a `MutexGuard` argument, but in that case the caller could
+clearly see what's going on. To create a true "nonlocal reasoning" problem,
+we'd need to write `foo` in a sync-then-async style, like this:
 
 ```rust
 fn foo() -> impl Future<Output = ()> {
