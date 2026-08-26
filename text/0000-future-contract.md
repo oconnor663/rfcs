@@ -553,8 +553,8 @@ futures directly (like they do today), without needing `Option`, [`MaybeDone`],
 or similar to represent the state where they drop a child without being dropped
 themselves. Instead, they cancel their children by returning `Ready` and
 trusting that their caller will drop them promptly. In other words, `Timeout`
-and `Race` can rely on the "`Poll::Ready` rule" to guarantee that they follow
-the "`Poll::Pending` rule".
+and `Race` can rely on the `Poll::Ready` rule to guarantee that they follow the
+`Poll::Pending` rule.
 
 [`Race`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html
 
@@ -563,11 +563,20 @@ one side of a `Join` finishes, it needs to drop that future immediately,
 without waiting for both sides to finish. Luckily, most implementations of
 `Join` already do this today, using `MaybeDone` or similar, because it saves
 space. (`MaybeDone` holds either a future or its output, but not both at the
-same time.) Codifying the "`Poll::Ready` rule" isn't expected to require any
-extra code changes, but it clarifies that callees can rely on the rule for
-correctness.
+same time.) Codifying the `Poll::Ready` rule isn't expected to require many
+code changes,[^code_changes] but it clarifies that callees can rely on the rule
+for correctness.
 
 [`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
+
+[^code_changes]: There are no known violations of the `Poll::Ready` rule in the
+    current versions of `futures-rs`, Tokio, or `futures-lite`. The original
+    implementation of the [`futures_lite::future::Zip`] combinator did break
+    the rule, but that was [reported as a deadlock bug][zip_deadlock] and fixed
+    in 2024.
+
+[`futures_lite::future::Zip`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.zip.html
+[zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
 
 ## Prior art
 [prior-art]: #prior-art
