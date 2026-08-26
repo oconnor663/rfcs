@@ -197,13 +197,13 @@ async fn main() {
 
 The `poll` method also imposes two responsibilities on its caller:
 
-1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
-   should **drop the future promptly**. Further calls to `poll` may panic or
-   otherwise misbehave (within the bounds of safe code).[^exceptions]
-
-2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
+1. If the last call to `poll` returned `Pending`, and the `Waker` passed to
    that call is later invoked, and the future hasn't been dropped in the
    meantime, the caller should **`poll` again promptly.**
+
+2. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
+   should **drop the future promptly**. Further calls to `poll` may panic or
+   otherwise misbehave (within the bounds of safe code).[^exceptions]
 
 [^exceptions]: This is how we need to treat generic futures that we don't know
     anything about. But specific types like [`Fuse`] or [`MaybeDone`], which
@@ -315,18 +315,18 @@ block or function, these responsibilities mean that `poll` will:
 
 The `poll` method also imposes two responsibilities on its caller:
 
-1. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
-   should **drop the future promptly**. Further calls to `poll` may panic or
-   otherwise misbehave (within the bounds of safe code).[^exceptions]
-
-2. If the last call to `poll` returned `Pending`, and the `Waker` passed to
+1. If the last call to `poll` returned `Pending`, and the `Waker` passed to
    that call is later invoked, and the future hasn't been dropped in the
    meantime, the caller should **`poll` again promptly.**
+
+2. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
+   should **drop the future promptly**. Further calls to `poll` may panic or
+   otherwise misbehave (within the bounds of safe code).[^exceptions]
 
 > Everything that follows, including the "Cancellation" section below, assumes
 > those new rules and elaborates on them.
 
-Here's an example of a `Future` implementation that fails that second
+Here's an example of a `Future` implementation that fails the first
 requirement, a.k.a. the "`Poll::Pending` rule":
 
 ```rust
