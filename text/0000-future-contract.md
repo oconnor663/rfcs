@@ -13,12 +13,12 @@ should never "pause" a future.
 
 [`Future::poll`]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
-There are widely used patterns that violate this rule, including
+There are widely used functions and patterns that violate this rule, including
 [`select!`]-by-reference and [`StreamExt::next`]. This RFC identifies several,
-but it avoids endorsing specific changes beyond the `Future` docs. The goal is
-to agree that these contract violations are bugs and that we can and should fix
-them, but deciding how exactly to fix or replace each problematic pattern is
-deferred to follow-up RFCs and/or the crates ecosystem.
+but it avoids endorsing any specific changes beyond the `Future` docs. The goal
+is to agree that these new/clarified contract violations are bugs, and that we
+can and should fix them, but deciding how exactly to fix or replace each
+problematic case is left to follow-up RFCs or the crates ecosystem.
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 
@@ -29,10 +29,10 @@ Cancellation and pausing are distinct features of async Rust. Regular,
 synchronous Rust doesn't let us kill or suspend threads, because doing either
 of those things tends to cause deadlocks.[^deprecated] Async cancellation
 solves the deadlock problem(!) by dropping cancelled futures, which
-automatically releases any locks they might be holding. But async pausing
-doesn't solve the deadlock problem, and that makes it arguably more of a bug
-than a feature. For a case study in how confusing and non-local these deadlocks
-can be in practice, see ["Futurelock"] (Oxide, October 2025).
+automatically releases any locks they might be holding. But async pausing does
+not solve the deadlock problem, and that makes it more of a bug than a feature.
+For a case study in how difficult and non-local these deadlocks can be in
+practice, see ["Futurelock"] (Oxide, October 2025).
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
     threads that are now deprecated ([Java][java], [C#][c_sharp],
@@ -50,15 +50,11 @@ can be in practice, see ["Futurelock"] (Oxide, October 2025).
 
 Another problem with async pausing is that, although we almost never do it
 explicitly,[^dioxus] we often do it implicitly, and it's surprisingly easy to
-do it accidentally. "Futurelock" was caused by unintended pausing in a
-[`select!`] loop, and async streams have been [battling pausing bugs][barbara]
-for years. These mistakes are invisible unless you know exactly what you're
-looking for.
-
-Let's look at an example to get a sense of how things go wrong and where we
-might be able to intervene. We'll start with something minimal and contrived,
-and then we'll expand it to look more realistic. Here's the minimal version
-([playground link][foo1]):
+do it accidentally. "Futurelock" was caused by unintended pausing [in a
+`select!` loop][futurelock_select], and async streams have been [battling
+pausing bugs][barbara] for years. These mistakes are invisible unless you know
+exactly what you're looking for, the sort of thing the Rust type system
+normally tries to protect us from.
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
@@ -66,6 +62,13 @@ and then we'll expand it to look more realistic. Here's the minimal version
 
 [dioxus_docs]: https://docs.rs/dioxus/0.7.10/dioxus/prelude/struct.UseFuture.html#method.pause
 [dioxus_src]: https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/hooks/src/use_future.rs#L63-L72
+
+[futurelock_select]: https://github.com/oxidecomputer/omicron/pull/9268/changes?diff=split
+
+Let's look at a minimal, contrived example of one of these deadlocks. Once it's
+clear what's going on, we'll expand it to look more realistic. Finally, we'll
+think about where exactly things go wrong and how we might intervene. Here's
+the minimal example ([playground link][foo1]):
 
 [foo1]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+foo_future+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+poll%21%28foo_future%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
@@ -92,12 +95,12 @@ the point where it's acquired `LOCK` and started sleeping. The second call to
 
 [`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
 
-`poll!` is kind of obscure, and the usual suspect in practice is [`select!`].
-That's [how "Futurelock" happened][futurelock_select]. But we don't have to use
-macros (besides `pin!`) to demonstrate this. Here's a version using [`timeout`]
-([playground link][foo2]):
+`poll!` is a bit obscure, and the usual suspect in these things is [`select!`].
+There's a `select!` example in the "Drawbacks" section below, but for
+simplicity and also to emphasize that none of this is specific to controversial
+macros, let's use [`timeout`] instead. The `foo` function is unchanged from
+above, and we'll keep using it throughout this RFC ([playground link][foo2]):
 
-[futurelock_select]: https://github.com/oxidecomputer/omicron/blob/58f95ded7eed49fd30659035c5c16b5bb9e63a76/nexus/src/app/background/tasks/support_bundle_collector.rs#L516-L550
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
 [foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+foo_future+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+foo_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
@@ -111,15 +114,16 @@ async fn main() {
 }
 ```
 
-This 1 ms timeout always expires before the 10 ms sleep in `foo` finishes, so
-again `foo_future` only gets polled once. But this still isn't very realistic.
-It would make more sense (and fix the deadlock) to [pass `foo_future` to
-`timeout` by value][foo_by_value] instead of pinning it like this. Driving
-futures in a loop is usually what forces us to `pin!` things, so let's add a
-loop. We'll also add a couple layers of abstraction around `foo`, for dramatic
-effect ([playground link][foo3]):
+The 1 ms timeout here expires before the 10 ms sleep in `foo` is finished, so
+again `foo_future` only gets polled once. This deadlock is still contrived,
+because [passing `foo_future` to `timeout` by value][foo_by_value] would be
+easier, and it would also fix the deadlock by dropping `foo_future` when the
+timeout expired. We don't usually need to `pin!` things and poll them by
+reference unless we're using a loop, so let's add a loop. While we're at it,
+we'll also bury `foo` under a couple layers of abstraction for dramatic effect
+([playground link][foo3]):
 
-[foo_by_value]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+foo_future+%3D+foo%28%29%3B%0A++++%2F%2F+Passing+%60foo_future%60+to+%60timeout%60+by+value+means+that+it+drops+when%0A++++%2F%2F+the+timeout+expires%2C+releasing+%60LOCK%60+and+fixing+the+deadlock.+Note%0A++++%2F%2F+that+we+also+don%27t+need+to+%60pin%21%60+it+in+this+case.%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+foo_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...and+also+here%21%22%29%3B%0A%7D>
+[foo_by_value]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+Passing+the+%60foo%60+future+to+%60timeout%60+by+value+means+that+it+drops%0A++++%2F%2F+when+the+timeout+expires%2C+releasing+%60LOCK%60+and+fixing+the+deadlock.%0A++++%2F%2F+We+also+don%27t+need+to+%60pin%21%60+it.%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+foo%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...and+also+here%21%22%29%3B%0A%7D>
 
 [foo3]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
@@ -748,5 +752,5 @@ TODO: `AsyncIterator`
 [`TerminateThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminatethread
 [`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
 [snooze]: https://jacko.io/snooze.html
-[`select!`]: https://docs.rs/tokio/latest/tokio/macro.select.html
+[`select!`]: https://tokio.rs/tokio/tutorial/select
 [`AsyncIterator`]: https://doc.rust-lang.org/core/async_iter/trait.AsyncIterator.html
