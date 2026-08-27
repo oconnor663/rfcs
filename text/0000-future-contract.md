@@ -451,19 +451,6 @@ we can come up with a version of the the deadlock in the "Motivation" section
 for each of them. This RFC doesn't attempt to decide how each case should be
 fixed, but see the "Future possibilities" section for possible approaches.
 
-- `poll!`
-- blanket impls
-- the `futures::future::select` function (not the macro)
-- `StreamExt::next`
-- concurrent ("buffered") streams
-- `FutureExt::shared`
-- `LocalSet::run_until` ?
-
-things that are fine
-
-- `timeout`
-- `select!`
-
 #### `select!` by reference
 
 The `timeout` example in the "Motivation" is a little bit easier to understand
@@ -527,6 +514,19 @@ stream::once(foo())
 ```rust
 let foo_future = foo().shared();
 _ = timeout(Duration::from_millis(1), foo_future.clone()).await;
+foo().await; // Deadlock!
+```
+
+#### `LocalSet`
+
+([playground link][localset_deadlock])
+
+[localset_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+local+%3D+tokio%3A%3Atask%3A%3ALocalSet%3A%3Anew%28%29%3B%0A++++local.spawn_local%28foo%28%29%29%3B%0A++++local.run_until%28sleep%28Duration%3A%3Afrom_millis%281%29%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rust
+let local = tokio::task::LocalSet::new();
+local.spawn_local(foo());
+local.run_until(sleep(Duration::from_millis(1))).await;
 foo().await; // Deadlock!
 ```
 
