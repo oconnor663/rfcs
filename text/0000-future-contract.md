@@ -482,6 +482,18 @@ loop {
 }
 ```
 
+#### `StreamExt::next`
+
+([playground link][next_deadlock])
+
+[next_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+stream+%3D+pin%21%28stream%3A%3Aonce%28foo%28%29%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+stream.next%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rust
+let mut stream = pin!(stream::once(foo()));
+_ = timeout(Duration::from_millis(1), stream.next()).await;
+foo().await; // Deadlock!
+```
+
 ### Pausing things is useful, and it would've been nice to allow it.
 
 Some applications might want to pause low-priority work when load is high.
@@ -528,11 +540,10 @@ Unfortunately, pausing futures in async Rust has all the same problems. Taking
 an async lock is far less common than e.g. calling `malloc`, so the symptoms
 aren't as noticeable today, but they'll get worse as the ecosystem grows and
 private locks appear in more places. In [the original "Futurelock"
-incident][incident], for example, the culprit was a semaphore buried in the
+incident][incident], the culprit was a semaphore buried in the
 `tokio::sync::mpsc` channel implementation. The channel in question wasn't even
 visible at the point where pausing happened. The non-local nature of these bugs
-is part of why we need to have an opinion about pausing at the
-language/ecosystem level.
+forces us to take a position on pausing at the language/ecosystem level.
 
 [incident]: https://github.com/oxidecomputer/omicron/issues/9259
 
