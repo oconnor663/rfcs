@@ -481,6 +481,19 @@ futures::future::poll_immediate(foo_future).await;
 foo().await; // Deadlock!
 ```
 
+([playground link][take_until_deadlock])
+
+[take_until_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_stream+%3D+pin%21%28stream%3A%3Aonce%28foo%28%29%29%29%3B%0A++++my_stream%0A++++++++.take_until%28sleep%28Duration%3A%3Afrom_millis%281%29%29%29%0A++++++++.for_each%28async+%7C_%7C+%7B%7D%29%0A++++++++.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rust
+let my_stream = pin!(stream::once(foo()));
+my_stream
+    .take_until(sleep(Duration::from_millis(1)))
+    .for_each(async |_| {})
+    .await;
+foo().await; // Deadlock!
+```
+
 #### `futures::future::select`
 
 ([playground link][select_fn_deadlock])
