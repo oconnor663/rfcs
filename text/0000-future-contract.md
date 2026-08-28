@@ -16,9 +16,9 @@ should never "pause" a future.
 There are widely used functions and patterns that violate this rule, including
 [`select!`]-by-reference and [`StreamExt::next`]. This RFC identifies several,
 but it avoids endorsing any specific changes beyond the `Future` docs. The goal
-is to agree that these new/clarified contract violations are bugs, and that we
-can and should fix them, but deciding how exactly to fix or replace each
-problematic case is left to follow-up RFCs or the crates ecosystem.
+is to agree that existing contract violations are bugs, and that we can and
+should fix them, but deciding how exactly to fix or replace each problematic
+case is left to follow-up RFCs and the crates ecosystem.
 
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 
@@ -97,13 +97,13 @@ the point where it's acquired `LOCK` and started sleeping. The second call to
 
 `poll!` is a bit obscure, and the usual suspect in these things is [`select!`].
 There's a `select!` example in the "Drawbacks" section below, but for
-simplicity and also to emphasize that none of this is specific to controversial
-macros, let's use [`timeout`] instead. The `foo` function is unchanged from
-above, and we'll keep using it throughout this RFC ([playground link][foo2]):
+simplicity and also to emphasize that none of this is specific to macros, let's
+use [`timeout`] instead. The `foo` function is unchanged from above, and we'll
+keep using it throughout this RFC ([playground link][foo2]):
 
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 
-[foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+foo_future+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+foo_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[foo2]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+foo_future+%3D+pin%21%28foo%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%285%29%2C+foo_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
 #[tokio::main]
@@ -114,16 +114,16 @@ async fn main() {
 }
 ```
 
-The 1 ms timeout here expires before the 10 ms sleep in `foo` is finished, so
+The 5 ms timeout here expires before the 10 ms sleep in `foo` is finished, so
 again `foo_future` only gets polled once. This deadlock is still contrived,
 because [passing `foo_future` to `timeout` by value][foo_by_value] would be
 easier, and it would also fix the deadlock by dropping `foo_future` when the
 timeout expired. We don't usually need to `pin!` things and poll them by
 reference unless we're using a loop, so let's add a loop. While we're at it,
-we'll also bury `foo` under a couple layers of abstraction for dramatic effect
-([playground link][foo3]):
+we'll also hide `foo` beneath a couple layers of abstraction for dramatic
+effect ([playground link][foo3]):
 
-[foo_by_value]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+Passing+the+%60foo%60+future+to+%60timeout%60+by+value+means+that+it+drops%0A++++%2F%2F+when+the+timeout+expires%2C+releasing+%60LOCK%60+and+fixing+the+deadlock.%0A++++%2F%2F+We+also+don%27t+need+to+%60pin%21%60+it.%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+foo%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...and+also+here%21%22%29%3B%0A%7D>
+[foo_by_value]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+Passing+the+%60foo%60+future+to+%60timeout%60+by+value+means+that+it+drops%0A++++%2F%2F+when+the+timeout+expires%2C+releasing+%60LOCK%60+and+fixing+the+deadlock.%0A++++%2F%2F+We+also+don%27t+need+to+%60pin%21%60+it.%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%285%29%2C+foo%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...and+also+here%21%22%29%3B%0A%7D>
 
 [foo3]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
@@ -149,28 +149,51 @@ async fn main() {
 
 This is more realistic. To complete the illusion, imagine that `foo`, `bar`,
 `baz`, and `main` are all defined in different crates. The lock is private to
-`foo`, but `main` doesn't depend on `foo` directly. Maybe the author of `main`
-has never even heard of `foo`. Who's "at fault" for a deadlock like this?
+`foo`, but `main` doesn't depend on `foo` directly, and the author of `main`
+has never heard of `foo`. Who's "at fault" for a deadlock like this?
 
-Let's look more closely at the sequence of events. If we [add some
+Let's look at the exact sequence of wakeup events. If we [add some
 prints][squawk], we can see that `main` gets polled three times. The first
 wakeup is at 0 ms when control first enters `main`, the second is at 5-6 ms
 when the `timeout` expires, and the third is at 10-11 ms when the `sleep` in
-`bar` (that is, in `foo`) completes.[^slack] Control in `main` is in the
-`baz().await` expression at that point, so the `baz` future gets polled again,
-even though it didn't request a wakeup. That's not in and of itself a problem,
-since futures are expected to tolerate over-polling. The problem is that the
-`bar` future _did_ request a wakeup, but it did _not_ get polled. In the body
-of `foo`, control enters the 10 ms sleep, but it never comes back out again,
-even though all the `Waker` and timer machinery is working correctly. That's
-not ok.
+`bar` (that is, in `bar`'s call to `foo`) completes.[^slack] Control in `main`
+is in the `baz().await` expression at that point, so the `baz` future gets
+polled again, even though it didn't request a wakeup. That's not in and of
+itself a problem, since futures are expected to tolerate over-polling. But the
+`bar` future does _not_ get polled, even though it's the one that triggered the
+wakeup.
 
 [squawk]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+Instant%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+main_inner%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++let+tick+%3D+Duration%3A%3Afrom_millis%285%29%3B%0A++++while+timeout%28tick%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D%0A%0A%2F%2F+Squawk+a+timestamp+every+time+%60future%60+gets+polled.%0Afn+squawk%3CFut%3A+Future%3E%28future%3A+Fut%29+-%3E+impl+Future%3COutput+%3D+Fut%3A%3AOutput%3E+%7B%0A++++let+start+%3D+Instant%3A%3Anow%28%29%3B%0A++++let+mut+future+%3D+Box%3A%3Apin%28future%29%3B%0A++++std%3A%3Afuture%3A%3Apoll_fn%28move+%7Ccx%7C+%7B%0A++++++++let+elapsed+%3D+Instant%3A%3Aelapsed%28%26start%29.as_secs_f32%28%29+*+1000.0%3B%0A++++++++println%21%28%22%5B%7Belapsed%3A.3%7D+ms%5D+POLLED%21%22%29%3B%0A++++++++future.as_mut%28%29.poll%28cx%29%0A++++%7D%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++squawk%28main_inner%28%29%29.await%3B%0A%7D>
 
 [^slack]: Tokio's timer implementation adds ~1 ms of slack to our 5 ms timeout
     and our 10 ms sleep.
 
-TODO: finish this section
+This is the core of the problem. The `bar` future is ready to make progress,
+and it has requested a wakeup. The runtime has polled `main` to deliver that
+wakeup. But `main` doesn't poll `bar`. Something in `main` is at fault here,
+but what?
+
+Should we blame `timeout`? Well, let's look [at its signature][`timeout`]:
+
+```rust
+pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
+```
+
+`timeout` takes its `future` argument _by value_. From its perspective, it's
+either going to drive `future` to completion, or it's going to cancel it by
+dropping it. As we noted above, dropping the `bar` future would also drop the
+lock guard that it's holding, which would fix the deadlock. `timeout` is doing
+everything in its power to make that happen.
+
+The problem is that we haven't given it the `bar` future, but rather a `&mut
+Pin<&mut _>` _reference_ to that future, and dropping that reference has no
+effect. Why does this compile? There are several blanket impls involved, but
+the important one is [`impl<P> Future for Pin<P> where P: ops::DerefMut<Target:
+Future>`][pin_blanket], i.e. that a `Pin<&mut _>` reference to any future is
+itself a future. The reference will behave just like the future it points to
+while you drive it, but cancelling it has no effect.
+
+[pin_blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
 [`join_maybe` playground][join_maybe]
 
