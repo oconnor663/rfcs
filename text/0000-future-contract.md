@@ -169,49 +169,39 @@ wakeup.
     and our 10 ms sleep.
 
 This is the core of the problem. The `bar` future is ready to make progress,
-and it has requested a wakeup. The runtime polls `main` to deliver that wakeup.
-But `main` doesn't forward `poll` to `bar`.
+and it requests a wakeup. The runtime polls `main`, but `main` doesn't forward
+`poll` to `bar`.
 
-Also, think about this from the perspective of `foo`'s body. We're taking an
-exclusive resource, and it's our responsibility not to hold it too long or leak
-it. We're going to do a 10 ms sleep, which means trusting the runtime's
-sleep/timer machinery not to forget our wakeup somehow. That's probably fine.
-It also means trusting the layers above us to _deliver_ the wakeup. It's not
-obvious that that's fine; we're looking at a case where it's broken. But if we
-can't rely on wakeups to get delivered reliably, is it ever ok to hold any
+Think about this from the perspective of `foo`'s body. If we're going to
+acquire an exclusive resource, then it's our responsibility not to hold it too
+long or leak it. If we're going to do a 10 ms sleep, that means we trust the
+runtime's sleep/timer machinery to trigger our wakeup correctly. That almost
+goes without saying; we rely on the runtime to do many things correctly, like
+we rely on the standard library or the compiler. But it also means we trust
+_all the layers above us_ to deliver that wakeup. It's not obvious that that's
+ok. After all, we're in the middle of looking at a case where it breaks. But if
+we can't rely on our wakeups getting delivered, is it ever ok to hold any
 exclusive resource across an await point?
 
 Unless we want to ban async locks -- and everything that contains an async
-lock, like [`tokio::sync::mpsc`] or [`OnceCell`] -- we need to be able to hold
-them across awaits, which means our callers need to be obligated to deliver our
-wakeups (or cancel us). We need to decide and document that callers like this
-`main` function are broken. That raises several important questions:
+lock, like [`tokio::sync::mpsc`] or [`OnceCell`] -- we need this to be ok. That
+means our callers need to be _obligated_ to deliver our wakeups (or cancel us).
+We need to agree that callers like this `main` function are broken, and we need
+to document that callees like `foo` are allowed to assume their callers behave
+correctly.
+
+That raises several important questions:
 
 [`tokio::sync::mpsc`]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 
-1. How can this example implement "call `baz` every 5 ms" while still honoring
-   `bar`'s wakeups?
-2. What warnings or errors should a broken example like this generate?
-3. How many other patterns are broken in this way?
-
-[`join_maybe` playground][join_maybe]
-
-[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CLeft%3A+Future%2C+Right%3A+Future%3E%28left%3A+Left%2C+right%3A+Right%29+-%3E+JoinMaybe%3CLeft%2C+Right%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++left%2C%0A++++++++right%3A+MaybeDone%3A%3AFuture%28right%29%2C%0A++++%7D%0A%7D%0A%0Apin_project_lite%3A%3Apin_project%21+%7B%0A++++struct+JoinMaybe%3CLeft%3A+Future%2C+Right%3A+Future%3E+%7B%0A++++++++%23%5Bpin%5D%0A++++++++left%3A+Left%2C%0A++++++++%23%5Bpin%5D%0A++++++++right%3A+MaybeDone%3CRight%3E%2C%0A++++%7D%0A%7D%0A%0Aimpl%3CLeft%3A+Future%2C+Right%3A+Future%3E+Future+for+JoinMaybe%3CLeft%2C+Right%3E+%7B%0A++++type+Output+%3D+%28Left%3A%3AOutput%2C+Option%3CRight%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+mut+this+%3D+self.project%28%29%3B%0A++++++++let+left_poll+%3D+this.left.poll%28cx%29%3B%0A++++++++_+%3D+this.right.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28left_output%29+%3D+left_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28left_output%2C+this.right.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+background_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+background_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
-
-```rust
-#[tokio::main]
-async fn main() {
-    // While `bar` is running, call `baz` every 5 ms.
-    let background_loop = async {
-        loop {
-            sleep(Duration::from_millis(5)).await;
-            baz().await;
-        }
-    };
-    join_maybe(bar(), background_loop).await;
-}
-```
+1. How can we write this `main` function correctly, calling `baz` every 5 ms
+   while still honoring `bar`'s wakeups? See the rationales section for more on
+   this.
+2. What warnings or errors should the broken code produce? See the future
+   possibilities section for more on this.
+3. How many other async Rust patterns are broken in similar ways? See the
+   drawbacks section for more on this.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -660,6 +650,89 @@ cleanup and by extension the borrow checker.
 
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
+
+### What does a corrected version of the broken `main` funciton above look like?
+
+The broken `main` function from the motivation section looked like this
+([playground link][foo3]):
+
+```rust
+#[tokio::main]
+async fn main() {
+    // While `bar` is running, call `baz` every 5 ms.
+    let mut bar_future = pin!(bar());
+    let tick = Duration::from_millis(5);
+    while timeout(tick, &mut bar_future).await.is_err() {
+        baz().await; // Deadlock!
+    }
+}
+```
+
+We need to factor our the `baz` loop into its own `async` block and run it
+concurrently. We can't just [`join`] that with `baz`, though, because it's an
+infinite loop, and we don't want to wait for it to never finish. If we want to
+stick with existing, widely-used helpers, we can do this with a `select!`
+([playgroud link][select_baz_loop]):
+
+[`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
+
+[select_baz_loop]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++select%21+%7B%0A++++++++_+%3D+bar%28%29+%3D%3E+%7B%7D%2C%0A++++++++_+%3D+baz_loop+%3D%3E+%7B%7D%2C%0A++++%7D%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
+
+```rust
+#[tokio::main]
+async fn main() {
+    // While `bar` is running, call `baz` every 5 ms.
+    let tick = Duration::from_millis(5);
+    let baz_loop = async {
+        loop {
+            sleep(tick).await;
+            baz().await;
+        }
+    };
+    select! {
+        _ = bar() => {},
+        _ = baz_loop => {},
+    }
+}
+```
+
+This works fine, and it's nice that it doesn't require `pin!`. But one downside
+of this approach is that `select!` suggests that we're waiting _either_ for
+`bar` _or_ for `baz_loop`. We know that `baz_loop` will never finish, so the
+resulting behavior is fine, but `select!` doesn't really capture our intent
+here. It would also be awkward if we needed the return value of `bar`.
+
+We could imagine a small helper function that might fit better, though it
+doesn't exist in `futures-rs` or Tokio today. It's job would be to drive two
+futures, but to only wait on the first one to finish, and to cancel the second
+one if it isn't finished at that point. Its signature could look like this:
+
+```rust
+async fn join_maybe<Fut1: Future, Fut2: Future>(
+    definitely: Fut1,
+    maybe: Fut2,
+) -> (Fut1::Output, Option<Fut2::Output>) { ... }
+```
+
+Here's what our `main` function looks like using `join_maybe` instead of `select!` ([playground link][join_maybe]):
+
+[`join_maybe` playground][join_maybe]
+
+[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
+
+```rust
+#[tokio::main]
+async fn main() {
+    // While `bar` is running, call `baz` every 5 ms.
+    let baz_loop = async {
+        loop {
+            sleep(Duration::from_millis(5)).await;
+            baz().await;
+        }
+    };
+    join_maybe(bar(), baz_loop).await;
+}
+```
 
 ### Can we enforce the `Future` contract programmatically?
 
