@@ -582,7 +582,7 @@ to implement by pausing futures. Those might not be our recommended
 architectural choices, but effectively forbidding them at the language level
 seems quite opinionated.[^forbid]
 
-[^forbid]: Of course an application can ultimately do whatever it likes,
+[^forbid]: Of course applications can ultimately do whatever they like,
     including pausing futures or killing threads. Part of what's at stake here
     is the question of who's "at fault" when such an application collides with
     a library ecosystem that uses locks.
@@ -651,7 +651,7 @@ cleanup and by extension the borrow checker.
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-### What does a corrected version of the broken `main` funciton above look like?
+### What does a corrected version of the broken `main` function above look like?
 
 The broken `main` function from the motivation section looked like this
 ([playground link][foo3]):
@@ -668,13 +668,19 @@ async fn main() {
 }
 ```
 
-We need to factor our the `baz` loop into its own `async` block and run it
-concurrently. We can't just [`join`] that with `baz`, though, because it's an
-infinite loop, and we don't want to wait for it to never finish. If we want to
-stick with existing, widely-used helpers, we can do this with a `select!`
-([playgroud link][select_baz_loop]):
+We'd like to factor out the `baz` loop into its own `async` block and run it
+concurrently, but we can't [`join`] that block with `baz`, because it never
+returns. There are a few different ways we could approach this, but if we
+wanted to stick with existing, widely-used helpers, one option would be to use
+`select!` ([playgroud link][select_baz_loop]):[^cancellation_token]
 
 [`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
+
+[^cancellation_token]: Another option is to wrap the `baz` loop with a
+    [`CancellationToken`], though that's easier to get wrong, and it also uses
+    heap allocation internally.
+
+[`CancellationToken`]: https://docs.rs/tokio-util/latest/tokio_util/sync/struct.CancellationToken.html
 
 [select_baz_loop]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++select%21+%7B%0A++++++++_+%3D+bar%28%29+%3D%3E+%7B%7D%2C%0A++++++++_+%3D+baz_loop+%3D%3E+%7B%7D%2C%0A++++%7D%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
 
@@ -682,10 +688,9 @@ stick with existing, widely-used helpers, we can do this with a `select!`
 #[tokio::main]
 async fn main() {
     // While `bar` is running, call `baz` every 5 ms.
-    let tick = Duration::from_millis(5);
     let baz_loop = async {
         loop {
-            sleep(tick).await;
+            sleep(Duration::from_millis(5)).await;
             baz().await;
         }
     };
@@ -696,18 +701,21 @@ async fn main() {
 }
 ```
 
-This works fine, and it's nice that it doesn't require `pin!`. But one downside
-of this approach is that `select!` suggests that we're waiting _either_ for
-`bar` _or_ for `baz_loop`. We know that `baz_loop` will never finish, so the
-resulting behavior is fine, but `select!` doesn't really capture our intent
-here. It would also be awkward if we needed the return value of `bar`.
+This works, and it's nice that it doesn't require `pin!`. But a downside of
+this approach is that `select!` suggests we're waiting for either `bar` or the
+`baz_loop` to finish. We know that the `baz_loop` will never finish, so the
+resulting behavior is correct, but `select!` doesn't really capture our intent.
+It would also be awkward if we needed the return value of `bar`.
 
-We could imagine a small helper function that might fit better, though it
-doesn't exist in `futures-rs` or Tokio today. It's job would be to drive two
-futures, but to only wait on the first one to finish, and to cancel the second
-one if it isn't finished at that point. Its signature could look like this:
+We could imagine a small helper function that might fit better, though it's not
+provided in `futures-rs` or Tokio today. It's job would be to drive two futures
+concurrently, but to only wait on the first one to finish. Let's call it
+`join_maybe`:
 
 ```rust
+/// Run a "definitely" future and a "maybe" future concurrently. If the definitely future finishes
+/// first, cancel the maybe future. Return the definitely output together with the maybe output if
+/// it wasn't cancelled.
 async fn join_maybe<Fut1: Future, Fut2: Future>(
     definitely: Fut1,
     maybe: Fut2,
@@ -715,8 +723,6 @@ async fn join_maybe<Fut1: Future, Fut2: Future>(
 ```
 
 Here's what our `main` function looks like using `join_maybe` instead of `select!` ([playground link][join_maybe]):
-
-[`join_maybe` playground][join_maybe]
 
 [join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
 
@@ -733,6 +739,23 @@ async fn main() {
     join_maybe(bar(), baz_loop).await;
 }
 ```
+
+That's a bit cleaner. But note that the `select!` macro is [extremely
+flexible][mini_redis],[^flexible] and this is just one of its simplest use
+cases. There's a wide open design space for other helper functions that mix
+joining, selecting, cancellation, shared mutability, and `no_std` support in
+different ways. For an example of another macro in this space, see
+[`join_me_maybe::join!`][join_me_maybe].
+
+[mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
+[join_me_maybe]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
+
+[^flexible]: If we reject examples that violate the new/clarified `Future`
+    contract in this RFC, `select!` becomes _considerably_ less flexible.
+    However, the combination of `if` guards, `biased`/fair modes, and
+    overlapping mutability in different arms (the arm bodies lower to a
+    `match`, and different match arms can mutate the same variables) is still
+    hard to compete with.
 
 ### Can we enforce the `Future` contract programmatically?
 
