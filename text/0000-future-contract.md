@@ -169,31 +169,31 @@ wakeup.
     and our 10 ms sleep.
 
 This is the core of the problem. The `bar` future is ready to make progress,
-and it has requested a wakeup. The runtime has polled `main` to deliver that
-wakeup. But `main` doesn't poll `bar`. Something in `main` is at fault here,
-but what?
+and it has requested a wakeup. The runtime polls `main` to deliver that wakeup.
+But `main` doesn't forward `poll` to `bar`.
 
-Should we blame `timeout`? Well, let's look [at its signature][`timeout`]:
+Also, think about this from the perspective of `foo`'s body. We're taking an
+exclusive resource, and it's our responsibility not to hold it too long or leak
+it. We're going to do a 10 ms sleep, which means trusting the runtime's
+sleep/timer machinery not to forget our wakeup somehow. That's probably fine.
+It also means trusting the layers above us to _deliver_ the wakeup. It's not
+obvious that that's fine; we're looking at a case where it's broken. But if we
+can't rely on wakeups to get delivered reliably, is it ever ok to hold any
+exclusive resource across an await point?
 
-```rust
-pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
-```
+Unless we want to ban async locks -- and everything that contains an async
+lock, like [`tokio::sync::mpsc`] or [`OnceCell`] -- we need to be able to hold
+them across awaits, which means our callers need to be obligated to deliver our
+wakeups (or cancel us). We need to decide and document that callers like this
+`main` function are broken. That raises several important questions:
 
-`timeout` takes its `future` argument _by value_. From its perspective, it's
-either going to drive `future` to completion, or it's going to cancel it by
-dropping it. As we noted above, dropping the `bar` future would also drop the
-lock guard that it's holding, which would fix the deadlock. `timeout` is doing
-everything in its power to make that happen.
+[`tokio::sync::mpsc`]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
+[`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 
-The problem is that we haven't given it the `bar` future, but rather a `&mut
-Pin<&mut _>` _reference_ to that future, and dropping that reference has no
-effect. Why does this compile? There are several blanket impls involved, but
-the important one is [`impl<P> Future for Pin<P> where P: ops::DerefMut<Target:
-Future>`][pin_blanket], i.e. that a `Pin<&mut _>` reference to any future is
-itself a future. The reference will behave just like the future it points to
-while you drive it, but cancelling it has no effect.
-
-[pin_blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
+1. How can this example implement "call `baz` every 5 ms" while still honoring
+   `bar`'s wakeups?
+2. What warnings or errors should a broken example like this generate?
+3. How many other patterns are broken in this way?
 
 [`join_maybe` playground][join_maybe]
 
