@@ -126,7 +126,7 @@ times:[^slack]
 
 Control in `main` is in the `baz().await` expression during the third poll, so
 the `baz` future gets polled again, even though it didn't request a wakeup.
-That's fine; futures are expected to tolerate over-polling. But the `bar`
+That's fine; futures are expected to tolerate extra polling. But the `bar`
 future does not get polled, even though it's the one that triggered the wakeup.
 That's a problem.
 
@@ -216,13 +216,9 @@ long work of fixing them.
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-### Important new text in the `Future` docs
+### `Future::poll` docs
 
-> This new text is the focus of this whole RFC. It's presented here in
-> isolation, for readers who want to see the important part first and who don't
-> need context. It's repeated in context in the following section.
-
-The `poll` method also imposes two responsibilities on its caller:
+The `poll` method imposes two responsibilities on its caller:
 
 1. If the last call to `poll` returned `Pending`, and the `Waker` passed to
    that call is later invoked, and the future hasn't been dropped in the
@@ -239,119 +235,6 @@ The `poll` method also imposes two responsibilities on its caller:
 
 [`MaybeDone`]: https://docs.rs/futures/latest/futures/future/enum.MaybeDone.html
 [`Fuse`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse
-
-### Expanded `Future` docs
-
-> This section repeats the important text above, but in the context of an an
-> expanded intro to `Future`, the way new learners might encounter it. This is
-> both to avoid presenting the important part entirely in a vacuum, and also to
-> make this RFC slightly more accessible to folks who haven't written a ton of
-> async Rust.
-
-A future represents a possibly-ongoing asynchronous computation and the value
-it might eventually return. The most common way to create a future is to call
-an `async fn`. Often we `.await` a future without giving it a name, like this:
-
-```rust
-async fn add_one(x: u32) -> u32 {
-    x + 1
-}
-
-assert_eq!(add_one(42).await, 43);
-```
-
-If we break that last line into three lines, we can see some of the temporary
-values involved:
-
-```rust
-let my_future = add_one(42);
-let my_output = my_future.await;
-assert_eq!(my_output, 43);
-```
-
-Intuitively, `u32` is the "return type" of `add_one`, but here we see that the
-expression `add_one()` actually evaluates to a future, and we get the `u32`
-when we `.await` that future. We can look at `add_one` in two different ways:
-it's an `async fn` that returns `u32`, but it's also a regular function that
-returns a future whose output is `u32`. That's what it means to be an `async
-fn`.
-
-Normally the compiler generates the "regular function that returns a future"
-for us, and we don't need to write it ourselves. But we can write it if we
-like. The following `fn add_one` is a drop-in replacement for `async fn
-add_one` above:
-
-```rust
-struct AddOne(u32);
-
-impl Future for AddOne {
-    type Output = u32;
-
-    fn poll(self: Pin<&mut Self>, _: &mut Context) -> Poll<u32> {
-        Poll::Ready(self.0 + 1)
-    }
-}
-
-fn add_one(x: u32) -> AddOne {
-    AddOne(x)
-}
-
-assert_eq!(add_one(42).await, 43);
-```
-
-This version of `add_one` explicitly returns an `AddOne` future. It behaves
-like an `async fn`, and we call it and `.await` it the same way. Implementing
-the `Future` trait is what makes `AddOne` a future, and the core of the
-`Future` trait is the `poll` method.
-
-#### The `poll` method
-
-The `Future::poll` method is called with a `Context` and (inside that) a
-`Waker`, and it returns either `Poll::Ready(_)` or `Poll::Pending`. `poll` has
-three responsibilities:
-
-1. Perform as much of the future's remaining work as possible, while returning
-   promptly and not blocking the caller.
-
-2. If the future's work is finished, return `Ready(_)` containing its
-   output.
-
-3. Otherwise, arrange to invoke the caller's `Waker` when the future should be
-   polled again, and return `Pending`.
-
-In the common case of a compiler-generated future that represents an `async`
-block or function, these responsibilities mean that `poll` will:
-
-1. Begin or resume executing the body. If control reaches an `.await` of an
-   inner future, and polling that inner future returns `Ready(_)`, continue
-   execution without returning.
-
-2. If control reaches an exit (end-of-scope, `return`, or a short-circuiting
-   `?`), return `Ready(_)` wrapping the body's return value.
-
-3. If control reaches an `.await` of an inner future, and polling that inner
-   future returns `Pending`, stop executing the body and return `Pending`. Rely
-   on the inner future to invoke the `Waker` when it should be polled again.
-   Some low-level futures use threads or operating system APIs like [`epoll`]
-   to implement wakeups, but `async fn` futures almost always delegate this
-   responsibility.
-
-[`epoll`]: https://en.wikipedia.org/wiki/Epoll
-
-> Here's the important new part that's excerpted in the previous section.
-
-The `poll` method also imposes two responsibilities on its caller:
-
-1. If the last call to `poll` returned `Pending`, and the `Waker` passed to
-   that call is later invoked, and the future hasn't been dropped in the
-   meantime, the caller should **`poll` again promptly.**
-
-2. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
-   should **drop the future promptly**. Further calls to `poll` may panic or
-   otherwise misbehave (within the bounds of safe code).[^exceptions]
-
-> Everything that follows, including the "Cancellation" section below, assumes
-> those new rules and elaborates on them.
 
 Here's an example of a `Future` implementation that fails the first
 requirement, a.k.a. the "`Poll::Pending` rule":
@@ -373,30 +256,48 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 ```
 
 The problem here is that `random` might be true the first time, polling the
-inner `Fut` and letting it register wakeups, but then it might be false the
-second time when those wakeups trigger, failing to poll `Fut` promptly. This
-mistake tends to cause hangs and deadlocks, and `CoinFlip` would be "at fault"
-for those bugs. There are three ways we can fix it:
+inner `Fut` and letting it register wakeups,[^first_time] but then it might be
+false the second time when those wakeups trigger, failing to poll `Fut`
+promptly. Mistakes like this tend to cause hangs and deadlocks, and `CoinFlip`
+would be "at fault" for those bugs. There are three different ways we could fix
+this:
 
 - Return `Ready` in the `else` branch, which requires the caller to drop
-  `CoinFlip` promptly. This would also mean changing the `Output` type to
-  `Option<_>`, or maybe adding a `Default` bound.
-- Drop the inner `Fut` in the `else` branch before returning `Pending`. We'd
-  need to make `self.0` an `Option<_>` or similar.
-- Panic in the `else` branch. This probably isn't what users want, but it's
-  technically correct, the best kind of correct.
+  `CoinFlip` promptly. This would require either changing the `Output` type to
+  `Option<Fut::Output>` or similar, or else adding a `Default` bound.
+- Drop the inner `Fut` in the `else` branch before returning `Pending`. In this
+  case `self.0` would need to be `Option<Fut>` or similar.
+- Panic in the `else` branch. This probably isn't what anyone wants, but it's
+  technically allowed.[^futurama]
+
+[^first_time]: On the other hand, if `random` is false the first time, we might
+    never poll `Fut`. Whether that's acceptable according to the `Future`
+    contract is an open question. See [the unresolved questions
+    section](#should-we-allow-an-indefinite-delay-between-creation-and-polling).
+
+[^futurama]: [Technically correct, the best kind of correct.][futurama]
+
+[futurama]: https://www.youtube.com/watch?v=aIzMuPMicGc&t=21s
 
 #### Cancellation
 
 Unlike threads, which have a life of their own once they start running, a
-future only makes progress when something polls it. A future's owner can
-effectively pause its execution by _not_ polling it again. However, the
-"`Poll::Pending` rule" above tightly constrains our options here: Whoever last
-called `poll` is supposed to make sure that `poll` gets called again promptly
-after a wakeup, unless the future is dropped in the meantime. If a wakeup
-arrives, and we don't want to poll it -- say because it's exceeded a timeout,
-or because we no longer need its output -- we must drop it promptly. When we
-drop a still-pending future like this, we call that "cancellation".
+future only makes progress when something polls it. We can effectively pause
+the execution of a future by not polling it again. However, the
+"`Poll::Pending` rule" above tightly constrains our options here. If a wakeup
+arrives, but we don't want to poll the future that triggered it[^unknown] --
+for example because a deadline has passed, or because we no longer need its
+output -- we must drop that future promptly. When we drop a still-pending
+future like this, we call that "cancellation".
+
+[^unknown]: It's possible to know which child (or children) triggered a given
+    wakeup by giving each child a unique `Waker`. [`FuturesUnordered`] does
+    this, for example. But most combinators forward their own `Waker` directly
+    to their children. When a wakeup arrives, they don't know which child
+    triggered it, and they need to poll all their children every time. Futures
+    tolerate extra polling, so both approaches are valid.
+
+[`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 
 There's nothing particularly special about cancelling a future compared to
 dropping any other Rust object. Its `Drop::drop` function runs (if any), and
@@ -825,12 +726,12 @@ future1.await;
 future2.await;
 ```
 
-We could say that `future2` is paused here across the first await. On the other
-hand, `future2` has never been polled (or even pinned), and it's not likely to
-be holding any exclusive resources in its initial state. We could imagine
-giving `foo` e.g. a `MutexGuard` argument, but in that case the caller could
-clearly see what's going on. To create a true "nonlocal reasoning" problem,
-we'd need to write `foo` in a sync-then-async style, like this:
+We could say that `future2` is snoozed here across the first await. On the
+other hand, `future2` has never been polled (or even pinned), and it's not
+likely to be holding any exclusive resources in its initial state. We could
+imagine giving `foo` e.g. a `MutexGuard` argument, but in that case the caller
+could see what's going on. To create a non-local problem, we'd need to write
+`foo` in a sync-then-async style, like this:
 
 ```rust
 fn foo() -> impl Future<Output = ()> {
