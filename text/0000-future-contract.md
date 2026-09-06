@@ -119,56 +119,48 @@ times:[^slack]
     and our 10 ms sleep.
 
 - 0 ms: Control first enters `main` and `bar`.
-- 5-6 ms: The `timeout` expires and invokes its `Waker`, `main` gets re-polled,
-  and control enters `baz`.
+- 5-6 ms: The first (and only) `timeout` expires and invokes its `Waker`,
+  `main` gets re-polled, and control enters `baz`.
 - 6-11 ms: The `sleep` in `bar` completes and invokes its `Waker`, and `main`
   gets re-polled again.
 
-Control in `main` is in the `baz().await` expression during the third poll, so
-the `baz` future gets polled again, even though it didn't request a wakeup.
-That's fine; futures are expected to tolerate extra polling. But the `bar`
-future does not get polled, even though it's the one that triggered the wakeup.
-That's a problem.
+When `main` gets polled the third time, it polls `baz` again, even though `baz`
+didn't request a wakeup. That's not in and of itself a problem; futures are
+expected to tolerate extra polling. But `bar` did request a wakeup, and `main`
+doesn't poll it. That's a problem.
 
 Imagine we're the programmer writing `foo`'s body. We going to acquire `LOCK`,
-and it's our responsibility not to hold it too long and certainly not to leak
-it. If we're going to `sleep` while we hold it, we have to be sure that the
-runtime's sleep/timer machinery will trigger our wakeup on time. That's fine;
-we always rely on the runtime for correctness, just like we rely on the
-standard library and the compiler. But then, we also have to be sure that
-_every caller above us_ will forward that wakeup. Is that fine? What if we
-don't trust them to do that?
-
-If we can't trust our callers to forward wakeups, we don't have many other
-options. To do anything with `LOCK`, we have to get control one way or another.
-If `main` isn't required to poll us, and it also isn't required to drop us and
-let us run destructors, then there's no way for us to run code.[^spawn_task]
-All we can do is assume that any `.await` point might be an indefinite sleep,
-and we can't hold a lock across an indefinite sleep. Nor can we use any type
-that takes a lock internally, like [`Semaphore`], [`OnceCell`], [bounded `mpsc`
-channels][`tokio::sync::mpsc`], or anything else built on those.
-
-[^spawn_task]: Futures spawned as tasks get their wakeups directly from the
-    runtime, so spawning a task is one way to avoid dropped wakeups. But
-    spawning requires heap allocation, it isn't supported in all environments,
-    and it isn't compatible with local borrowing.
+and we're taking responsibility for not holding it too long. If we're going to
+do any blocking IO while we hold it, we have to be sure that the runtime will
+trigger our wakeup correctly. That's fine; we naturally rely on the runtime for
+correctness, just like we rely on the standard library and the compiler. But
+then, we also have to be sure that our caller -- and our caller's caller --
+will forward our wakeup. Is that fine? What if we're library code, and we don't
+know anything about our callers?[^spawn_task] Are we allowed to hold an async
+[`Mutex`] across an await point? What about types that take async locks
+internally, like [`OnceCell`] or [bounded `mpsc`
+channels][`tokio::sync::mpsc`]?
 
 [`Mutex`]: https://doc.servo.org/tokio/sync/struct.Mutex.html
-[`Semaphore`]: https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [`tokio::sync::mpsc`]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-We want to say that there's nothing wrong with `foo`, and that async functions
-are generally allowed to take locks. That means we need to require callers to
-deliver wakeups promptly (or else cancel the future that requested one).
-Specifically, the `Future` trait itself needs to document this requirement, and
-we need to deprecate `Future` implementations that can't uphold it.
+[^spawn_task]: Futures spawned as tasks get their wakeups directly from the
+    runtime, so spawning a task is one way to guarantee our wakeups will arrive
+    without trusting unknown callers. But spawning isn't a general-purpose
+    solution for these issues. It requires heap allocation, it isn't supported
+    in all environments, and it isn't compatible with local borrowing.
 
-So what about `main`? It doesn't _look_ broken. If we're going to say that
-`main` is at fault here, we had better be able to point to some problematic
-type or function that it's using, blame our troubles on that, and at least slap
-a warning on it. Maybe we can blame...`timeout`? Let's take a look [at its
-signature]:
+To allow async functions like `foo` to take locks, we have to let them assume
+that their callers will deliver wakeups. When that assumption is broken, we
+then need to blame the caller who dropped the wakeup. In the example above,
+`main` is at fault for the deadlock. The `Future` contract needs to make that
+clear.
+
+On the other hand, `main` doesn't _look_ broken. If we're going to declare that
+it is, we had better be able to point to some problematic type or function that
+it's using, blame our troubles on that, and deprecate it. Should we
+blame...`timeout`? Let's take a look [at its signature]:
 
 [at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
 
@@ -178,40 +170,47 @@ where
     F: IntoFuture,
 ```
 
-Even without looking at the implementation, that signature tells us something
-important: `timeout` takes its `future` argument _by value_. `future` winds up
-in some field of the [`Timeout`] struct, and when the `Timeout` struct drops,
-`future` drops too. In other words, if the deadline arrives before `future` is
-finished, `timeout` _cancels_ `future`. That's exactly what we want it to do.
+That signature shows us something important: `timeout` takes its `future`
+argument _by value_. The `future` winds up in some field of the [`Timeout`]
+struct, and when the `Timeout` struct drops, the `future` drops too. In other
+words, if the deadline arrives before `future` is finished, `timeout` _cancels_
+`future`. That's exactly what we want it to do.
 
 [`Timeout`]: https://docs.rs/tokio/1.53.1/tokio/time/struct.Timeout.html
 
-The reason this doesn't fix our deadlock above, is that we aren't passing the
-`bar` future to `timeout` by value. Instead, we're passing in a `&mut Pin<&mut
-_>` reference to it. _Why does that compile?_ There are several blanket impls
-involved, but the most important one is [the blanket `Future` impl on `Pin<&mut
-_>` references][blanket]. In effect, a `Pin<&mut _>` reference to a `Future` is
-itself a `Future`, except that dropping it does nothing. If dropping futures
-that we aren't going to poll anymore is a critical part of the `Future`
-contract, then this blanket impl is broken.[^box]
+But then, why didn't that prevent our deadlock above? Because we didn't pass
+the `bar` future to `timeout` by value.[^compile_error] Instead, we gave
+`timeout` a `&mut Pin<&mut _>` reference. The question is, why does that
+compile? There are several blanket impls involved, but the most important one
+is [the blanket `Future` impl on `Pin<&mut _>` references][blanket]. In effect,
+a `Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
+dropping it does nothing. If dropping futures that we aren't going to poll is a
+critical part of the `Future` contract, then that blanket impl is broken.
 
-[^box]: This impl covers `Pin<P> where P: DerefMut<Target: Future>`, which
+[^compiler_error]: If we did pass `bar` to `timeout` by value, our loop
+    wouldn't compile. The compiler would force us to create a new `bar` future
+    in each loop iteration, but that's not the behavior we want. See [the
+    rationales
+    section](#what-does-a-corrected-version-of-the-broken-main-function-above-look-like)
+    for examples of implementing the behavior we want correctly.
+
+However, this RFC doesn't propose deprecating that blanket impl
+immediately.[^box] Lots of existing async code relies on it, and it will take
+years for the ecosystem to roll out helper functions and macros that handle the
+same use cases with ownership instead of poll-by-reference. Also, while that
+impl is the most common way to violate the `Future` contract today, it's not
+the only way. `AsyncIterator`/`Stream` in particular have deadlock bugs of
+their own, and we'll need at least one follow-up RFC to address those.
+
+[^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
     includes both `Pin<&mut _>` and `Pin<Box<_>>`. The former is broken, but
     the latter is fine, and it's critical for working with trait objects. Even
-    ignoring backwards compatibility concerns, we wouldn't want to deprecate
-    the whole impl.
-
-However, this RFC doesn't propose slapping a warning on that impl today. Tons
-of existing async code relies on it, and it will take years for the ecosystem
-to roll out helper functions and macros that handle the same use cases using
-ownership instead of poll-by-reference. Also, while that impl is the most
-common way to violate the `Future` contract today, it's not the only way.
-`AsyncIterator`/`Stream` in particular have their own deadlock bugs, and we'll
-need at least one follow-up RFC to address those.
+    ignoring backwards compatibility concerns, we don't want to deprecate the
+    whole impl.
 
 Instead, this RFC proposes the smallest possible change: Document the `Future`
-contract. Once we agree on exactly where the bugs come from, we can start the
-long work of fixing them.
+contract. Agree on exactly where these bugs are coming from, so we can start
+fixing them.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
