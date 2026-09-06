@@ -121,8 +121,18 @@ times:[^slack]
 - 0 ms: Control first enters `main` and `bar`.
 - 5-6 ms: The first (and only) `timeout` expires and invokes its `Waker`,
   `main` gets re-polled, and control enters `baz`.
-- 6-11 ms: The `sleep` in `bar` completes and invokes its `Waker`, and `main`
-  gets re-polled again.
+- 6-11 ms: The `sleep` in `bar` completes[^sleep] and invokes its `Waker`, and
+  `main` gets polled again.
+
+[^sleep]: This can be confusing: How does `sleep` invoke anything if the
+    `Sleep` future isn't getting polled? It's true that control never reaches
+    the `Sleep` future again after the first poll, but low-level IO is driven
+    by external events, and we arrange for those events to invoke wakers to let
+    us know when we should poll again. For sleeps and other timers, Tokio runs
+    a ["hashed timer wheel"][tokio_timer] in the background, and `sleep`
+    registers its `Waker` there.
+
+[tokio_timer]: https://tokio.rs/blog/2018-03-timers
 
 When `main` gets polled the third time, it polls `baz` again, even though `baz`
 didn't request a wakeup. That's not in and of itself a problem; futures are
