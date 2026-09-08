@@ -50,7 +50,7 @@ practice, see ["Futurelock"] (Oxide, October 2025).
 
 Another problem with async pausing is that, although we almost never do it
 explicitly,[^dioxus] we often do it implicitly, and it's surprisingly easy to
-do it accidentally. "Futurelock" was caused by a snoozing bug [in a `select!`
+do it accidentally. Futurelock was caused by a snoozing bug [in a `select!`
 loop][futurelock_select], and async streams have been [battling hangs and
 deadlocks][barbara] for years. These mistakes are invisible unless you know
 exactly what you're looking for.
@@ -64,18 +64,17 @@ exactly what you're looking for.
 
 [futurelock_select]: https://github.com/oxidecomputer/omicron/pull/9268/changes?diff=split
 
-Here's an example of a snoozing deadlock using [`timeout`].[^usual_suspect]
+Here's an example of one of these deadlocks using [`timeout`].[^usual_suspect]
 Imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
 crates, and that the author of `main` has never heard of `foo` ([playground
 link][timeout_deadlock]):
 
 [timeout_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
-[^usual_suspect]: The usual suspect in these issues is `select!`, but using
-    `timeout` instead lets us talk about its function signature below. Also
-    some folks get the impression that `select!` is uniquely broken, but we
-    want to emphasize that (as we'll see) any form of cancellation has the same
-    problem when combined with [the blanket `Future` impl on `Pin<&mut _>`
+[^usual_suspect]: `select!` is the usual suspect in these issues, but using
+    `timeout` instead makes it easier to discuss its function signature. As
+    we'll see below, any form of cancellation has the same problem when
+    combined with [the blanket `Future` impl on `Pin<&mut _>`
     references][blanket].
 
 [blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
@@ -138,14 +137,14 @@ We re-poll `baz` at 10 ms, even though it didn't request a wakeup. That's not
 in and of itself a problem; futures are expected to tolerate extra polling. But
 `bar` did request a wakeup, and `main` doesn't poll it. That's a problem.
 
-Imagine we're the programmer writing `foo`'s body. We're acquiring `LOCK`, and
-it's our responsibility not to hold it too long. If we want to do any blocking
-IO while we hold it, we have to be sure that the runtime will trigger our
-wakeup correctly. That's fine; we naturally rely on the runtime for
-correctness, just like we rely on the standard library and the compiler. But
-then, we also have to be sure that our caller will forward that wakeup. Is that
-fine? What if we're library code, and we don't know anything about our
-callers?[^spawn_task]
+Consider this problem from the perspective of the programmer writing `foo`.
+You're acquiring `LOCK`, and it's your responsibility not to hold it too long.
+If your want to do any blocking IO while you hold it, you have to be sure that
+the runtime will trigger your wakeup correctly. That's fine; you naturally rely
+on the runtime for correctness, just like you rely on the standard library and
+the compiler. But then, you also have to be sure that your caller will deliver
+that wakeup. Is that fine? What if you're writing library code, and you don't
+know anything about your callers?[^spawn_task]
 
 [^spawn_task]: Futures spawned as tasks get their wakeups directly from the
     runtime, so spawning a task is one way to guarantee our wakeups will arrive
@@ -154,20 +153,21 @@ callers?[^spawn_task]
     in all environments, and it isn't compatible with local borrowing.
 
 For async locks to be usable -- or any type that contains an async lock, like
-[`OnceCell`] or [bounded `mpsc` channels][mpsc] -- functions like `foo` have to
-trust their callers to deliver wakeups. We need to agree that callers who fail
-to do that (without dropping the requesting future) are broken. In the example
-above, that means `main` is at fault for the deadlock. The `Future` contract
-needs to make that clear.
+[`OnceCell`] or [bounded `mpsc` channels][mpsc] -- you need to trust your
+callers to deliver wakeups. That means everyone needs to agree that callers who
+fail to do that (without dropping the requesting future) are broken. In the
+example above, that means `main` is at fault for the deadlock. The `Future`
+contract needs to make that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-That said, `main` doesn't _look_ broken. If we're going to frame the `Future`
-contract this way, we also need a plan for emitting a warning or an error in
-`main`. Ideally we'd point to some problematic type or function that `main` is
-using, blame all our troubles on that, and deprecate it. Should we
-blame...`timeout`? Well, let's look [at its signature]:
+At the same time, `main` doesn't _look_ broken. If we want the `Future`
+contract to have strict rules, we'll need warnings and errors to let us know
+when we break those rules. Ideally we'd single out some problematic type or
+function that `main` is using, blame all our troubles on that, and deprecate
+it. The natural suspect is `timeout`, so let's bring it in for questioning.
+Here's its [function signature]:
 
 [at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
 
