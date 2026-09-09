@@ -152,42 +152,45 @@ know anything about your callers?[^spawn_task]
     solution for these issues. It requires heap allocation, it isn't supported
     in all environments, and it isn't compatible with local borrowing.
 
-For async locks to be usable -- or any type that contains an async lock, like
-[`OnceCell`] or [bounded `mpsc` channels][mpsc] -- you need to trust your
-callers to deliver wakeups. That means everyone needs to agree that callers who
-fail to do that (without dropping the requesting future) are broken. In the
-example above, that means `main` is at fault for the deadlock. The `Future`
-contract needs to make that clear.
+For async locks to be usable -- or for that matter any type that contains an
+async lock, like [`OnceCell`] or [bounded `mpsc` channels][mpsc] -- we need to
+trust our callers to deliver wakeups. That means we need to agree that callers
+who fail to do that (without dropping the requesting future) are broken. In the
+example above, `main` is at fault for the deadlock, and the `Future` contract
+itself needs to make that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-At the same time, `main` doesn't _look_ broken. If we want the `Future`
-contract to have strict rules, we'll need warnings and errors to let us know
-when we break those rules. Ideally we'd single out some problematic type or
-function that `main` is using, blame all our troubles on that, and deprecate
-it. The natural suspect is `timeout`, so let's bring it in for questioning.
-Here's its [function signature]:
+That said, `main` doesn't _look_ broken.[^pin] If we want the `Future` contract
+to have strict rules, we need reliable warnings and errors to let us know when
+we're breaking those rules. Ideally we'd find some problematic type or function
+that `main` is using, blame our troubles on that, and deprecate it. The obvious
+suspect is `timeout`, so let's bring it in for questioning. Here's its
+[function signature][`timeout`]:
 
 [at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
+
+[^pin]: `pin!` is arguably a red flag, but see the discussion of pinning in the
+    alternatives section.
 
 ```rust
 pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
 ```
 
 That signature shows us something important: `timeout` takes a `future` _by
-value_. It winds up in some field of the [`Timeout`] struct, and when the
+value_. It winds up in some field of the [`Timeout`] struct, so then when the
 `Timeout` struct drops, `future` drops too. In other words, if the deadline
 arrives before `future` is finished, `timeout` _cancels_ `future`. That's
 exactly what the contract says it should do.
 
 [`Timeout`]: https://docs.rs/tokio/1.53.1/tokio/time/struct.Timeout.html
 
-But then, why didn't that prevent our deadlock above? Because we didn't pass
-the `bar` future to `timeout` by value.[^compiler_error] Instead, we gave
-`timeout` a `&mut Pin<&mut _>` reference. So the question is then, how does
-that compile? There are several blanket impls involved, but the most important
-one is [the `Future` impl for `Pin<&mut _>` references][blanket]. In effect, a
+But then, why didn't that prevent our deadlock above? Because we didn't
+actually pass the `bar` future to `timeout` by value.[^compiler_error] Instead,
+we used a `&mut Pin<&mut _>` reference. So now the question is, how does that
+compile? There are several blanket impls involved, but the most important one
+is [the `Future` impl for `Pin<&mut _>` references][blanket]. In effect, a
 `Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
 dropping it does nothing. If dropping cancelled futures promptly is part of the
 `Future` contract, then that blanket impl is broken.
@@ -204,8 +207,9 @@ existing async code relies on it, and it will take months-to-years for the
 ecosystem to roll out helper functions and macros that handle the same use
 cases with ownership instead of poll-by-reference. Also, while that impl is
 probably the most common way to violate the `Future` contract today, it's not
-the only way. `AsyncIterator`/`Stream` in particular have related deadlock bugs
-of their own, and we'll need at least one follow-up RFC to address those.
+the only way. `AsyncIterator`/`Stream` have similar deadlock bugs, and we'll
+need at least one follow-up RFC to address those. See the drawbacks section
+below for a list of related problems.
 
 [^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
     includes both `Pin<&mut _>` and `Pin<Box<_>>`. The former is broken, but
@@ -787,4 +791,5 @@ TODO: `AsyncIterator`
 [`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
 [snooze]: https://jacko.io/snooze.html
 [`select!`]: https://tokio.rs/tokio/tutorial/select
+[`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 [`AsyncIterator`]: https://doc.rust-lang.org/core/async_iter/trait.AsyncIterator.html
