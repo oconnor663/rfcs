@@ -30,9 +30,9 @@ synchronous Rust doesn't let us kill or suspend threads, because doing either
 of those things tends to cause deadlocks.[^deprecated] Async cancellation
 solves the deadlock problem(!) by dropping cancelled futures, which
 automatically releases any locks they might be holding. But async pausing does
-not solve the deadlock problem, and that makes it more of a bug than a feature.
-For a case study in how difficult and non-local these deadlocks can be in
-practice, see ["Futurelock"] (Oxide, October 2025).
+not solve the deadlock problem, which makes it more of a bug than a feature.
+For a case study in how difficult and non-local these deadlocks can be, see
+["Futurelock"] (Oxide, October 2025).
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
     threads that are now deprecated ([Java][java], [C#][c_sharp],
@@ -64,9 +64,9 @@ exactly what you're looking for.
 
 [futurelock_select]: https://github.com/oxidecomputer/omicron/pull/9268/changes?diff=split
 
-Here's an example of one of these deadlocks using [`timeout`].[^usual_suspect]
-Imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
-crates, and that the author of `main` has never heard of `foo` ([playground
+Here's an example deadlock using [`timeout`].[^usual_suspect] Imagine that
+`foo`, `bar`, `baz`, and `main` are all defined in different crates, and that
+the author of `main` has never heard of `foo` ([playground
 link][timeout_deadlock]):
 
 [timeout_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
@@ -106,11 +106,10 @@ async fn main() {
 }
 ```
 
-While control is waiting on the `baz().await` expression, nothing is polling
-`bar_future`. But `bar_future` is already holding the lock that `baz` wants to
-acquire, and the result is a deadlock. Let's look closely at who gets polled
-when. If we [add some prints][squawk], we can see that `main` gets polled three
-times:[^slack]
+While control is waiting on `baz()`, nothing is polling `bar_future`. But
+`bar_future` is already holding the lock that `baz` wants to acquire, and the
+result is a deadlock. Let's look closely at who gets polled when. If we [add
+some prints][squawk], we can see that `main` gets polled three times:[^slack]
 
 [squawk]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+Instant%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+main_inner%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D%0A%0A%2F%2F+Squawk+a+timestamp+every+time+%60future%60+gets+polled.%0Afn+squawk%3CFut%3A+Future%3E%28future%3A+Fut%29+-%3E+impl+Future%3COutput+%3D+Fut%3A%3AOutput%3E+%7B%0A++++let+start+%3D+Instant%3A%3Anow%28%29%3B%0A++++let+mut+future+%3D+Box%3A%3Apin%28future%29%3B%0A++++std%3A%3Afuture%3A%3Apoll_fn%28move+%7Ccx%7C+%7B%0A++++++++let+elapsed+%3D+Instant%3A%3Aelapsed%28%26start%29.as_secs_f32%28%29+*+1000.0%3B%0A++++++++println%21%28%22%5B%7Belapsed%3A.3%7D+ms%5D+POLLED%21%22%29%3B%0A++++++++future.as_mut%28%29.poll%28cx%29%0A++++%7D%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++squawk%28main_inner%28%29%29.await%3B%0A%7D>
 
@@ -126,10 +125,9 @@ times:[^slack]
 [^sleep]: This can be confusing: How does `sleep` invoke anything if the
     `Sleep` future isn't getting polled? It's true that control never reaches
     the `Sleep` future again after the first poll, but low-level IO is driven
-    by external events, and we arrange for those events to invoke wakers to let
-    us know when we should poll again. For sleeps and other timers, Tokio runs
-    a ["hashed timer wheel"][tokio_timer] in the background, and `sleep`
-    registers its `Waker` there.
+    by external events, and we arrange for those events to invoke wakers. For
+    sleeps and other timers, Tokio runs a ["hashed timer wheel"][tokio_timer]
+    in the background, and `sleep` registers its `Waker` there.
 
 [tokio_timer]: https://tokio.rs/blog/2018-03-timers
 
@@ -137,14 +135,14 @@ We re-poll `baz` at 10 ms, even though it didn't request a wakeup. That's not
 in and of itself a problem; futures are expected to tolerate extra polling. But
 `bar` did request a wakeup, and `main` doesn't poll it. That's a problem.
 
-Consider this problem from the perspective of the programmer writing `foo`.
-You're acquiring `LOCK`, and it's your responsibility not to hold it too long.
-If your want to do any blocking IO while you hold it, you have to be sure that
-the runtime will trigger your wakeup correctly. That's fine; you naturally rely
-on the runtime for correctness, just like you rely on the standard library and
-the compiler. But then, you also have to be sure that your caller will deliver
-that wakeup. Is that fine? What if you're writing library code, and you don't
-know anything about your callers?[^spawn_task]
+Consider the problem from the perspective of the programmer writing `foo`.
+You're acquiring `LOCK`, and it's your responsibility not to hold it for too
+long. If you do any blocking IO while you hold it, you're trusting the runtime
+to trigger your wakeup correctly. That's fine; you naturally rely on the
+runtime for correctness, just like you rely on the standard library and the
+compiler. But then, you're also trusting your callers to deliver that wakeup.
+Is that fine? What if you're writing library code, and you don't know anything
+about your callers?[^spawn_task]
 
 [^spawn_task]: Futures spawned as tasks get their wakeups directly from the
     runtime, so spawning a task is one way to guarantee our wakeups will arrive
@@ -152,37 +150,41 @@ know anything about your callers?[^spawn_task]
     solution for these issues. It requires heap allocation, it isn't supported
     in all environments, and it isn't compatible with local borrowing.
 
-For async locks to be usable -- or for that matter any type that contains an
-async lock, like [`OnceCell`] or [bounded `mpsc` channels][mpsc] -- we need to
-trust our callers to deliver wakeups. That means we need to agree that callers
-who fail to do that (without dropping the requesting future) are broken. In the
+For async locks to be usable -- or any type that contains an async lock, like a
+[`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- we need a guarantee that
+our callers will either deliver our wakeups or drop us promptly. The whole
+ecosystem needs to agree to this, every future and every combinator. In the
 example above, `main` is at fault for the deadlock, and the `Future` contract
 itself needs to make that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-That said, `main` doesn't _look_ broken.[^pin] If we want the `Future` contract
-to have strict rules, we need reliable warnings and errors to let us know when
-we're breaking those rules. Ideally we'd find some problematic type or function
-that `main` is using, blame our troubles on that, and deprecate it. The obvious
-suspect is `timeout`, so let's bring it in for questioning. Here's its
-[function signature][`timeout`]:
+Unfortunately, `main` doesn't _look_ broken. If we want the `Future`
+contract to have strict rules, we also need warnings or errors to let us know
+when we break those rules. Can we deprecate some problematic type or function
+that `main` is using? The only obvious candidate here is `timeout`.[^pin] Is
+`timeout` doing something wrong? Let's look at its [function
+signature][`timeout`]:
 
 [at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
 
-[^pin]: `pin!` is arguably a red flag, but see the discussion of pinning in the
-    alternatives section.
+[^pin]: `pin!` is arguably a red flag, but pinning per se doesn't have anything
+    to do with control flow or wakeups. We often manage heterogenous futures as
+    `Pin<Box<dyn Future>>`, but we can also [abuse one of those][boxed] to
+    replace `pin!` in this example.
+
+[boxed]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AFutureExt%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+bar%28%29.boxed%28%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
 ```rust
 pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
 ```
 
-That signature shows us something important: `timeout` takes a `future` _by
-value_. It winds up in some field of the [`Timeout`] struct, so then when the
+That signature shows us something important: `timeout` takes a `future` by
+value. It winds up in some field of the [`Timeout`] struct, so then when the
 `Timeout` struct drops, `future` drops too. In other words, if the deadline
-arrives before `future` is finished, `timeout` _cancels_ `future`. That's
-exactly what the contract says it should do.
+arrives before `future` is finished, `timeout` cancels `future`. That's exactly
+what the new/clarified contract says it should do.
 
 [`Timeout`]: https://docs.rs/tokio/1.53.1/tokio/time/struct.Timeout.html
 
@@ -193,7 +195,7 @@ compile? There are several blanket impls involved, but the most important one
 is [the `Future` impl for `Pin<&mut _>` references][blanket]. In effect, a
 `Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
 dropping it does nothing. If dropping cancelled futures promptly is part of the
-`Future` contract, then that blanket impl is broken.
+strict `Future` contract, then that blanket impl is broken.
 
 [^compiler_error]: If we did pass `bar` to `timeout` by value, our loop
     wouldn't compile. The compiler would force us to create a new `bar` future
@@ -206,10 +208,10 @@ However, this RFC doesn't propose deprecating it immediately.[^box] Lots of
 existing async code relies on it, and it will take months-to-years for the
 ecosystem to roll out helper functions and macros that handle the same use
 cases with ownership instead of poll-by-reference. Also, while that impl is
-probably the most common way to violate the `Future` contract today, it's not
-the only way. `AsyncIterator`/`Stream` have similar deadlock bugs, and we'll
-need at least one follow-up RFC to address those. See the drawbacks section
-below for a list of related problems.
+probably the most common way to violate the strict `Future` contract today,
+it's not the only way. `AsyncIterator`/`Stream` have similar deadlock bugs, and
+we'll need at least one follow-up RFC to address those. See the drawbacks
+section below for a list of related problems.
 
 [^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
     includes both `Pin<&mut _>` and `Pin<Box<_>>`. The former is broken, but
