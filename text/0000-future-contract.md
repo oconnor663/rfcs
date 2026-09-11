@@ -133,7 +133,15 @@ some prints][squawk], we can see that `main` gets polled three times:[^slack]
 
 We re-poll `baz` at 10 ms, even though it didn't request a wakeup. That's not
 in and of itself a problem; futures are expected to tolerate extra polling. But
-`bar` did request a wakeup, and `main` doesn't poll it. That's a problem.
+`bar` did request a wakeup, and `main` doesn't poll it. That's a problem.[^hang]
+
+[^hang]: Even if there was no lock in this example, and thus no deadlock, it's
+    still surprising that `bar` is paused every time we call `baz`. Most users
+    in this situation expect them to run concurrently, except in [rare cases
+    involving complicated mutation][mini_redis]. Snoozing futures in a real
+    application can cause performance issues, network timeout errors, or UI
+    stuttering. This RFC focuses on deadlocks for clarity, but these other bugs
+    are also [common in practice][barbara].
 
 Consider the problem from the perspective of the programmer writing `foo`.
 You're acquiring `LOCK`, and it's your responsibility not to hold it for too
@@ -150,22 +158,21 @@ about your callers?[^spawn_task]
     solution for these issues. It requires heap allocation, it isn't supported
     in all environments, and it isn't compatible with local borrowing.
 
-For async locks to be usable -- or any type that contains an async lock, like a
+For async locks to be usable -- or any type that contains one, like a
 [`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- we need a guarantee that
-our callers will either deliver our wakeups or drop us promptly. The whole
-ecosystem needs to agree to this, every future and every combinator. In the
-example above, `main` is at fault for the deadlock, and the `Future` contract
-itself needs to make that clear.
+callers will either deliver our wakeups or drop us promptly. The whole
+ecosystem needs to agree on this "strict" `Future` contract. In the example
+above, `main` is at fault for the deadlock, and the `Future` docs need to make
+that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-Unfortunately, `main` doesn't _look_ broken. If we want the `Future`
-contract to have strict rules, we also need warnings or errors to let us know
-when we break those rules. Can we deprecate some problematic type or function
-that `main` is using? The only obvious candidate here is `timeout`.[^pin] Is
-`timeout` doing something wrong? Let's look at its [function
-signature][`timeout`]:
+Unfortunately, `main` doesn't _look_ broken. If we want the `Future` contract
+to have strict rules, we also need warnings and errors that let us know when we
+break those rules. Can we deprecate some problematic type or function that
+`main` is using? The natural suspect here is `timeout`.[^pin] Let's look at its
+[function signature][`timeout`]:
 
 [at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
 
@@ -180,36 +187,38 @@ signature][`timeout`]:
 pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
 ```
 
-That signature shows us something important: `timeout` takes a `future` by
-value. It winds up in some field of the [`Timeout`] struct, so then when the
-`Timeout` struct drops, `future` drops too. In other words, if the deadline
-arrives before `future` is finished, `timeout` cancels `future`. That's exactly
-what the new/clarified contract says it should do.
+That signature shows us something important: `timeout` takes `future` _by
+value_. It winds up in some field of the [`Timeout`] struct, so when that
+struct drops, `future` drops too. In other words, if `duration` expires before
+`future` is finished, `timeout` cancels `future` by dropping it. That's exactly
+what the strict contract says it should do.
 
 [`Timeout`]: https://docs.rs/tokio/1.53.1/tokio/time/struct.Timeout.html
 
-But then, why didn't that prevent our deadlock above? Because we didn't
-actually pass the `bar` future to `timeout` by value.[^compiler_error] Instead,
-we used a `&mut Pin<&mut _>` reference. So now the question is, how does that
-compile? There are several blanket impls involved, but the most important one
-is [the `Future` impl for `Pin<&mut _>` references][blanket]. In effect, a
-`Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
-dropping it does nothing. If dropping cancelled futures promptly is part of the
-strict `Future` contract, then that blanket impl is broken.
+But then, why didn't that prevent our deadlock above? We didn't actually pass
+the `bar` future to `timeout` by value.[^compiler_error] Instead, we used a
+`&mut Pin<&mut _>` reference. The question is, why did that compile? There are
+several blanket impls involved, but the most important one is [the `Future`
+impl for `Pin<&mut _>` references][blanket]. In effect, a `Pin<&mut _>`
+reference to a `Future` is itself a `Future`, except that dropping it has no
+effect. If the strict `Future` contract requires us to drop cancelled futures
+promptly, then that blanket impl is broken.
 
-[^compiler_error]: If we did pass `bar` to `timeout` by value, our loop
+[^compiler_error]: Also, if we passed `bar` to `timeout` by value, our loop
     wouldn't compile. The compiler would force us to create a new `bar` future
-    in each loop iteration, but that's not the behavior we want. See [the
-    rationales
+    in each loop iteration. That's deadlock-free, but it's not the behavior we
+    want here. See [the rationales
     section](#what-does-a-corrected-version-of-the-broken-main-function-above-look-like)
     for examples of implementing the behavior we want correctly.
 
-However, this RFC doesn't propose deprecating it immediately.[^box] Lots of
-existing async code relies on it, and it will take months-to-years for the
-ecosystem to roll out helper functions and macros that handle the same use
-cases with ownership instead of poll-by-reference. Also, while that impl is
-probably the most common way to violate the strict `Future` contract today,
-it's not the only way. `AsyncIterator`/`Stream` have similar deadlock bugs, and
+However, this RFC doesn't propose deprecating it today. For one thing, Rust
+doesn't currently have a way to deprecate a trait impl. Also, the same impl
+covers `Pin<Box<_>>`, which absolutely should implement `Future`. But most
+importantly, tons of existing async code uses `Pin<&mut _>` references as
+futures today, and it will take months to years to roll out helper functions
+and macros that handle the same use cases with ownership instead. Also, while
+this is the most common way to violate the strict `Future` contract today, it's
+not the only way. `AsyncIterator` and `Stream` have similar deadlock bugs, and
 we'll need at least one follow-up RFC to address those. See the drawbacks
 section below for a list of related problems.
 
@@ -219,9 +228,9 @@ section below for a list of related problems.
     ignoring backwards compatibility concerns, we don't want to deprecate the
     whole impl.
 
-Instead, this RFC proposes the smallest possible change: Document the `Future`
-contract. Agree on exactly where these bugs are coming from, so that we can get
-started fixing them.
+Instead, this RFC proposes the smallest possible change: Document the strict
+`Future` contract. Once we agree on exactly where these bugs are coming from,
+we can start the gradual process of fixing them.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -246,8 +255,10 @@ The `poll` method imposes two responsibilities on its caller:
 [`MaybeDone`]: https://docs.rs/futures/latest/futures/future/enum.MaybeDone.html
 [`Fuse`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse
 
-Here's an example of a `Future` implementation that fails the first
-requirement, a.k.a. the "`Poll::Pending` rule":
+#### Example
+
+Here's an example of a `Future` implementation that fails the first requirement
+above, a.k.a. the "`Poll::Pending` rule":
 
 ```rust
 pub struct CoinFlip<Fut>(Pin<Box<Fut>>); // TODO: a standard way to do unboxed pin projection?
@@ -265,27 +276,28 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 }
 ```
 
-The problem here is that `random` might be true the first time, polling the
-inner `Fut` and letting it register wakeups,[^first_time] but then it might be
-false the second time when those wakeups trigger, failing to poll `Fut`
-promptly. Mistakes like this tend to cause hangs and deadlocks, and `CoinFlip`
-would be "at fault" for those bugs. There are three different ways we could fix
-this:
+The problem is that `random()` might be true the first time, polling the inner
+`Fut` and letting it register wakeups,[^first_time] but then it might be false
+the second time when those wakeups trigger, failing to poll `Fut` promptly.
+Mistakes like this tend to cause hangs and deadlocks, not only in the future
+that didn't get polled, but also in distant and unrelated futures that happen
+to use the same shared resources. `CoinFlip` would be at fault for those bugs.
+There are three different ways we could fix it:
 
 - Return `Ready` in the `else` branch, which requires the caller to drop
-  `CoinFlip` promptly. This would require either changing the `Output` type to
-  `Option<Fut::Output>` or similar, or else adding a `Default` bound.
-- Drop the inner `Fut` in the `else` branch before returning `Pending`. In this
-  case `self.0` would need to be `Option<Fut>` or similar.
+  `CoinFlip` promptly. We'd probably need to change the `Output` type to
+  `Option` or `Result`.
+- Drop `self.0` in the `else` branch before returning `Pending`. In this case
+  `self.0` would need to be `Option<Fut>` or similar.
 - Panic in the `else` branch. This probably isn't what anyone wants, but it's
-  technically allowed.[^futurama]
+  technically correct.[^futurama]
 
 [^first_time]: On the other hand, if `random` is false the first time, we might
     never poll `Fut`. Whether that's acceptable according to the `Future`
     contract is an open question. See [the unresolved questions
     section](#should-we-allow-an-indefinite-delay-between-creation-and-polling).
 
-[^futurama]: [Technically correct, the best kind of correct.][futurama]
+[^futurama]: [The best kind of correct.][futurama]
 
 [futurama]: https://www.youtube.com/watch?v=aIzMuPMicGc&t=21s
 
@@ -294,18 +306,18 @@ this:
 Unlike threads, which have a life of their own once they start running, a
 future only makes progress when something polls it. We can effectively pause
 the execution of a future by not polling it again. However, the
-"`Poll::Pending` rule" above tightly constrains our options here. If a wakeup
-arrives, but we don't want to poll the future that triggered it[^unknown] --
-for example because a deadline has passed, or because we no longer need its
-output -- we must drop that future promptly. When we drop a still-pending
-future like this, we call that "cancellation".
+"`Poll::Pending` rule" above limits our options here. If a wakeup arrives, but
+we don't want to poll the future that triggered it[^unknown] -- for example
+because a deadline has passed, or because we no longer need its output -- we
+must drop that future promptly. When we drop a still-pending future like this,
+we call that "cancellation".
 
 [^unknown]: It's possible to know which child (or children) triggered a given
     wakeup by giving each child a unique `Waker`. [`FuturesUnordered`] does
     this, for example. But most combinators forward their own `Waker` directly
-    to their children. When a wakeup arrives, they don't know which child
-    triggered it, and they need to poll all their children every time. Futures
-    tolerate extra polling, so both approaches are valid.
+    to their children, so they don't know which child triggered a wakeup, and
+    they need to poll all their children every time. Futures tolerate extra
+    polling, so both approaches are valid.
 
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 
@@ -668,7 +680,6 @@ joining, selecting, cancellation, shared mutability, and `no_std` support in
 different ways. For an example of another macro in this space, see
 [`join_me_maybe::join!`][join_me_maybe].
 
-[mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 [join_me_maybe]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
 
 [^flexible]: If we reject examples that violate the new/clarified `Future`
@@ -795,3 +806,4 @@ TODO: `AsyncIterator`
 [`select!`]: https://tokio.rs/tokio/tutorial/select
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 [`AsyncIterator`]: https://doc.rust-lang.org/core/async_iter/trait.AsyncIterator.html
+[mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
