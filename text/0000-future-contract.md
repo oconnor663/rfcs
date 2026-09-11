@@ -321,27 +321,12 @@ we call that "cancellation".
 
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 
-There's nothing particularly special about cancelling a future compared to
-dropping any other Rust object. Its `Drop::drop` function runs (if any), and
-then the `Drop::drop` functions of its fields run (if any), all as usual.
-Importantly, this includes local variables in `async` blocks and functions,
-which are fields in their compiler-generated futures. It's good that we don't
-leak those, of course. But the important thing to understand about cancellation
-is less _how_ we do it, and more that we're forced to _do something_ rather
-than nothing. The `Poll::Pending` rule requires every future to actively
-participate in what we might call the "`Waker` protocol" between its caller and
-any child futures it might contain. When a future is polled, it can poll its
-own children in turn (unless it knows for a fact that they did not request a
-wakeup), or it can cancel them by dropping them (either directly or indirectly,
-e.g. by returning `Ready` and trusting the caller to drop it), but it can't
-silently ignore a child's wakeup.
-
-This turns out to be essential for futures that can acquire locks or other
-exclusive resources. If a future is supposed to hold a lock for a short time,
-the programmer needs to consider that it might release the lock sooner if it's
-cancelled, or maybe a bit later because of timer slack or CPU load. But the
-programmer doesn't need to worry about the caller's caller's caller pausing
-execution and thereby (accidentally, unknowingly) holding the lock _forever_.
+This rule is essential for futures that acquire locks or other exclusive
+resources. When an async function holds a lock across an await point, the
+programmer needs to consider that it might release that lock sooner than
+expected if it's cancelled, or a bit later due to timer slack or CPU load. But
+the programmer doesn't need to worry about the caller pausing execution and
+thereby (accidentally, unknowingly) holding the lock _forever_.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -361,12 +346,11 @@ return without waiting for a completion notification from those threads.
 
 [budget]: https://tokio.rs/blog/2020-04-preemption
 
-What these cases have in common is that, barring program exit or the power
-going out, future progress is guaranteed. There's no (legitimate) way for user
-code to stop the runtime from working through its task list or freeze a private
-worker thread. This is in contrast to the deadlocks in the Motivation section,
-where a future is suspended across some arbitrary bit of user code that isn't
-guaranteed to ever finish.
+What these cases have in common, though, is that barring program exit or the
+power going out, future progress is guaranteed. There's no legitimate way for
+user code to stop the runtime from working through its task list or freeze a
+private worker thread. The deadlocks above are different: a future is suspended
+across some arbitrary bit of user code that isn't guaranteed to ever finish.
 
 A fully formal definition of "promptly" will probably end up with somewhat
 unsatisfying wording like "a finite period of time". Consider this excerpt from
