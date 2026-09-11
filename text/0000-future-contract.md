@@ -349,8 +349,13 @@ return without waiting for a completion notification from those threads.
 What these cases have in common, though, is that barring program exit or the
 power going out, future progress is guaranteed. There's no legitimate way for
 user code to stop the runtime from working through its task list or freeze a
-private worker thread. The deadlocks above are different: a future is suspended
-across some arbitrary bit of user code that isn't guaranteed to ever finish.
+private worker thread.[^illegitimate] The deadlocks above are different: a
+future is suspended across some arbitrary bit of user code that isn't
+guaranteed to ever finish.
+
+[^illegitimate]: _Illegitimate_ ways to interfere with the runtime include
+    synchronous blocking in `poll`, calling unsafe functions like
+    [`pthread_cancel`], or just corrupting memory.
 
 A fully formal definition of "promptly" will probably end up with somewhat
 unsatisfying wording like "a finite period of time". Consider this excerpt from
@@ -489,6 +494,27 @@ let local = tokio::task::LocalSet::new();
 local.spawn_local(foo());
 local.run_until(sleep(Duration::from_millis(1))).await;
 foo().await; // Deadlock!
+```
+
+#### unwinding from `block_on`
+
+([playground link][unwinding_deadlock])
+
+[unwinding_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apanic%3A%3Acatch_unwind%3B%0Ause+std%3A%3Atime%3A%3ADuration%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0A%0Astatic+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A%0Aasync+fn+async_foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++tokio%3A%3Atime%3A%3Asleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Afn+sync_foo%28%29+%7B%0A++++%2F%2F+As+above%2C+but+sync+rather+than+async.%0A++++let+_guard+%3D+LOCK.blocking_lock%28%29%3B%0A++++std%3A%3Athread%3A%3Asleep%28Duration%3A%3Afrom_millis%2810%29%29%3B%0A%7D%0A%0Afn+main%28%29+%7B%0A++++%2F%2F+Build+a+single-threaded+runtime.+If+we+used+%60new_multi_thread%60+instead%2C+then+%60async_foo%60%0A++++%2F%2F+would+start+running+on+a+worker+thread+as+soon+as+we+spawned+it%2C+and+it+would+keep+running%0A++++%2F%2F+even+after+the+panic+below.+We+wouldn%27t+get+a+deadlock+in+that+case.+See%3A%0A++++%2F%2F+https%3A%2F%2Fdocs.rs%2Ftokio%2F1.53.1%2Ftokio%2Fruntime%2F%23driving-the-runtime%0A++++let+runtime+%3D+tokio%3A%3Aruntime%3A%3ABuilder%3A%3Anew_current_thread%28%29%0A++++++++.enable_time%28%29%0A++++++++.build%28%29%0A++++++++.unwrap%28%29%3B%0A%0A++++%2F%2F+Run+%60async_foo%60+in+the+background.+Execution+doesn%27t+actually+begin+until+%60block_on%60+below.%0A++++runtime.spawn%28async_foo%28%29%29%3B%0A%0A++++%2F%2F+Start+driving+the+runtime+with+%60block_on%60+and+a+second+future.+This+async+block+panics+after%0A++++%2F%2F+5+ms%2C+which+unwinds+out+of+%60block_on%60%2C+but+we+catch+the+panic+here+in+%60main%60.%0A++++_+%3D+catch_unwind%28%7C%7C+%7B%0A++++++++runtime.block_on%28async+%7B%0A++++++++++++tokio%3A%3Atime%3A%3Asleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++panic%21%28%22panic+while+%60async_foo%60+holds+%60LOCK%60%22%29%3B%0A++++++++%7D%29%3B%0A++++%7D%29%3B%0A%0A++++%2F%2F+At+this+point+the+%60async_foo%60+future+is+still+holding+%60LOCK%60%2C+but+we%27re+no+longer+driving%0A++++%2F%2F+the+runtime+that+owns+it.+If+we+try+to+take+%60LOCK%60+any+other+way+before+we+either+resume%0A++++%2F%2F+driving+%60runtime%60+or+drop+it%2C+we+get+a+deadlock.%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++sync_foo%28%29%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rust
+let runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_time()
+    .build()
+    .unwrap();
+runtime.spawn(async_foo());
+_ = catch_unwind(|| {
+    runtime.block_on(async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        panic!("panic while `async_foo` holds `LOCK`");
+    });
+});
+sync_foo(); // Deadlock!
 ```
 
 ### Pausing things is useful, and it would've been nice to allow it.
