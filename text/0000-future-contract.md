@@ -596,16 +596,15 @@ cleanup and by extension the borrow checker.
 
 ### What does a corrected version of the broken `main` function above look like?
 
-The broken `main` function from the motivation section looked like this
-([playground link][foo3]):
+As a reminder, the broken `main` function from the motivation section looked
+like this ([playground link][timeout_deadlock]):
 
 ```rust
 #[tokio::main]
 async fn main() {
     // While `bar` is running, call `baz` every 5 ms.
     let mut bar_future = pin!(bar());
-    let tick = Duration::from_millis(5);
-    while timeout(tick, &mut bar_future).await.is_err() {
+    while timeout(Duration::from_millis(5), &mut bar_future).await.is_err() {
         baz().await; // Deadlock!
     }
 }
@@ -645,10 +644,11 @@ async fn main() {
 ```
 
 This works, and it's nice that it doesn't require `pin!`. But a downside of
-this approach is that `select!` suggests we're waiting for either `bar` or the
-`baz_loop` to finish. We know that the `baz_loop` will never finish, so the
-resulting behavior is correct, but `select!` doesn't really capture our intent.
-It would also be awkward if we needed the return value of `bar`.
+this approach is that `select!` makes it look like we're waiting for either
+`bar` or the `baz_loop` to finish. We know that the `baz_loop` will never
+finish, so the resulting behavior is correct, but `select!` doesn't really
+capture our intent. It would also be awkward if we needed the return value of
+`bar`.
 
 We could imagine a small helper function that might fit better, though it's not
 provided in `futures-rs` or Tokio today. It's job would be to drive two futures
