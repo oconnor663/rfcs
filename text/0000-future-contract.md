@@ -261,7 +261,7 @@ Here's an example of a `Future` implementation that fails the first requirement
 above, a.k.a. the "`Poll::Pending` rule":
 
 ```rust
-pub struct CoinFlip<Fut>(Pin<Box<Fut>>); // TODO: a standard way to do unboxed pin projection?
+pub struct CoinFlip<Fut>(Pin<Box<Fut>>);
 
 impl<Fut: Future> Future for CoinFlip<Fut> {
     type Output = Fut::Output;
@@ -270,6 +270,8 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
         if rand::random() {
             self.0.as_mut().poll(cx)
         } else {
+            // XXX: `self.0` might have requested a wakeup. Returning without polling it here
+            // violates the `Future` contract.
             Poll::Pending
         }
     }
@@ -277,12 +279,14 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 ```
 
 The problem is that `random()` might be true the first time, polling the inner
-`Fut` and letting it register wakeups,[^first_time] but then it might be false
-the second time when those wakeups trigger, failing to poll `Fut` promptly.
-Mistakes like this tend to cause hangs and deadlocks, not only in the future
-that didn't get polled, but also in distant and unrelated futures that happen
-to use the same shared resources. `CoinFlip` would be at fault for those bugs.
-There are three different ways we could fix it:
+`Fut` and letting it register wakeups, but then it might be false the second
+time when those wakeups trigger, failing to poll `Fut` promptly.[^first_time]
+This tends to cause hangs and deadlocks, not only for the future that didn't
+get polled, but also in distant and unrelated futures that happen to use the
+same shared resources ([playground link][coin_flip]). `CoinFlip` would be at
+fault for those bugs. There are three different ways we could fix it:
+
+[coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Apub+struct+CoinFlip%3CFut%3E%28Pin%3CBox%3CFut%3E%3E%29%3B%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.0.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60self.0%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60coin_flip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60coin_flip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60coin_flip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++let+coin_flip+%3D+CoinFlip%28Box%3A%3Apin%28bar%28%29%29%29%3B%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+coin_flip+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
 
 - Return `Ready` in the `else` branch, which requires the caller to drop
   `CoinFlip` promptly. We'd probably need to change the `Output` type to
