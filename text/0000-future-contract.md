@@ -206,8 +206,8 @@ promptly, then that blanket impl is broken.
     wouldn't compile. The compiler would force us to create a new `bar` future
     in each loop iteration. That's deadlock-free, but it's not the behavior we
     want here. See [the rationales
-    section](#what-does-a-corrected-version-of-the-broken-main-function-above-look-like)
-    for examples of implementing the behavior we want correctly.
+    section](#how-can-we-fix-the-timeout-deadlock-at-the-top) for examples of
+    implementing the behavior we want correctly.
 
 However, this RFC doesn't propose deprecating it today. For one thing, Rust
 doesn't currently have a way to deprecate a trait impl. Also, the same impl
@@ -390,21 +390,20 @@ and we can come up with a version of the the deadlock above for each of them.
 
 #### Cancellation by reference
 
-Our original `timeout` deadlock is an example of a category we might call
-"cancellation by reference". Since dropping a reference is a no-op, we can
-cause a deadlock anywhere a lock guard ought to be dropped by driving its
-owning future by reference instead of by value. The most common way to do this
-is with [`select!`] ([playground link][select_deadlock]):
+The `timeout` deadlock at the top is an example of a category we might call
+"cancellation by reference". We can cause a deadlock anywhere cancellation
+occurs by having the cancelled future hold a lock and having its owner drive it
+by reference. The most common way to do this is with [`select!`] ([playground
+link][select_deadlock]):
 
-[select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++select%21+%7B%0A++++++++_+%3D+%26mut+bar_future+%3D%3E+%7B%7D%2C%0A++++++++_+%3D+sleep%28Duration%3A%3Afrom_millis%285%29%29+%3D%3E+%7B%7D%0A++++%7D%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++select%21+%7B%0A++++++++_+%3D+%26mut+bar_future+%3D%3E+%7B%7D%2C%0A++++++++_+%3D+sleep%28Duration%3A%3Afrom_millis%285%29%29+%3D%3E+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%0A%7D>
 
 ```rust
 let mut bar_future = pin!(bar());
 select! {
     _ = &mut bar_future => {},
-    _ = sleep(Duration::from_millis(5)) => {}
+    _ = sleep(Duration::from_millis(5)) => baz().await, // Deadlock!
 }
-baz().await; // Deadlock!
 ```
 
 Since `Stream` and `AsyncIterator` both have a [similar blanket impl for
@@ -447,13 +446,18 @@ Apart from the cancellation issue with `.next()` above, streams also have a
 concurrency issue. After a concurrent stream yields an item, nothing drives its
 other child streams until the next item is requested. Here we'll use [`merge`]
 for concurrency, but this applies equally to [`buffered`] streams and
-[`FuturesUnordered`]. We can produce these deadlocks with `.next()` even if we
+[`FuturesUnordered`].[^equally] We can produce these deadlocks with `.next()` even if we
 don't cancel it ([playground link][concurrent_next_deadlock]):[^fair]
 
 [`merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
 
-[concurrent_next_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+stream1+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+stream2+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+mut+my_stream+%3D+pin%21%28stream1.merge%28stream2%29%29%3B%0A++++_+%3D+my_stream.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[^equally]: Here's [the `buffered` version][buffered_deadlock] and here's [the
+    `FuturesUnordered` version][futures_unordered_deadlock].
+
+[buffered_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3A%7BStreamExt%2C+stream%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aiter%28vec%21%5Bbar%28%29%2C+bar%28%29%5D%29%0A++++++++.buffered%282%29%0A++++++++.for_each%28async+%7C_%7C+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
+
+[futures_unordered_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3AFuturesUnordered%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+futures+%3D+FuturesUnordered%3A%3Anew%28%29%3B%0A++++futures.push%28bar%28%29%29%3B%0A++++futures.push%28bar%28%29%29%3B%0A++++_+%3D+futures.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 [^fair]: Note that in this case (though not in any of the examples before
     this), the deadlock happens because the lock we're using is "fair". The
@@ -464,13 +468,15 @@ don't cancel it ([playground link][concurrent_next_deadlock]):[^fair]
     sleep after unlocking, to give other instances a chance to acquire the
     lock. ([playground link][unfair_mutex])
 
-[unfair_mutex]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Alock%3A%3AMutex%3B%0Ause+futures%3A%3Astream%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+std%3A%3Async%3A%3ALazyLock%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+This+mutex+implementation+is+unfair%21+%28It+also+doesn%27t+have+a+const+new+function%2C+so+we+need%0A++++%2F%2F+a+%60LazyLock%60+to+initialize+it.%29%0A++++static+LOCK%3A+LazyLock%3CMutex%3C%28%29%3E%3E+%3D+LazyLock%3A%3Anew%28%7C%7C+Mutex%3A%3Anew%28%28%29%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A++++%2F%2F+This+second+sleep+allows+the+second+%60bar%60+to+acquire+the+lock+before+the+first+%60bar%60%0A++++%2F%2F+finishes+below.+If+you+comment+it+out%2C+the+deadlock+no+longer+appears.%0A++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+stream1+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+stream2+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+mut+my_stream+%3D+pin%21%28stream1.merge%28stream2%29%29%3B%0A++++_+%3D+my_stream.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[unfair_mutex]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Alock%3A%3AMutex%3B%0Ause+futures%3A%3Astream%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+std%3A%3Async%3A%3ALazyLock%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+This+mutex+implementation+is+unfair%21+%28It+also+doesn%27t+have+a+const+new+function%2C+so+we+need%0A++++%2F%2F+a+%60LazyLock%60+to+initialize+it.%29%0A++++static+LOCK%3A+LazyLock%3CMutex%3C%28%29%3E%3E+%3D+LazyLock%3A%3Anew%28%7C%7C+Mutex%3A%3Anew%28%28%29%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A++++%2F%2F+This+second+sleep+allows+the+second+%60bar%60+to+acquire+the+lock+before+the+first+%60bar%60%0A++++%2F%2F+finishes+below.+If+you+comment+it+out%2C+the+deadlock+no+longer+appears.%0A++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+bar_stream1+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+bar_stream2+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+mut+merged_stream+%3D+pin%21%28bar_stream1.merge%28bar_stream2%29%29%3B%0A++++_+%3D+merged_stream.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+[concurrent_next_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+bar_stream1+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+bar_stream2+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+mut+merged_stream+%3D+pin%21%28bar_stream1.merge%28bar_stream2%29%29%3B%0A++++_+%3D+merged_stream.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
-let stream1 = stream::once(bar());
-let stream2 = stream::once(bar());
-let mut my_stream = pin!(stream1.merge(stream2));
-_ = my_stream.next().await;
+let bar_stream1 = stream::once(bar());
+let bar_stream2 = stream::once(bar());
+let mut merged_stream = pin!(bar_stream1.merge(bar_stream2));
+_ = merged_stream.next().await;
 baz().await; // Deadlock!
 ```
 
@@ -479,75 +485,119 @@ the stream by value ([playground link][concurrent_for_each_deadlock]):
 
 [`for_each`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
 
-[concurrent_for_each_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+stream1+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++let+stream2+%3D+stream%3A%3Aonce%28bar%28%29%29%3B%0A++++stream1.merge%28stream2%29%0A++++++++.for_each%28%7C_%7C+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29.await%3B%0A%7D>
+[concurrent_for_each_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aonce%28bar%28%29%29%0A++++++++.merge%28stream%3A%3Aonce%28bar%28%29%29%29%0A++++++++.for_each%28async+%7C_%7C+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
 ```rust
-let stream1 = stream::once(bar());
-let stream2 = stream::once(bar());
-stream1.merge(stream2)
-    .for_each(|_| async {
+stream::once(bar())
+    .merge(stream::once(bar()))
+    .for_each(async |_| {
         baz().await; // Deadlock!
-    }).await;
+    })
+    .await;
 ```
 
 #### `futures::future::select`
 
-([playground link][select_fn_deadlock])
+The [`select`][select_fn] _function_ (not the macro) returns the losing future
+by value instead of dropping it. We can cause a deadlock if we retain it
+([playground link][select_fn_deadlock]):
 
-[select_fn_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Afuture%3A%3Aready%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+_ret+%3D+futures%3A%3Afuture%3A%3Aselect%28Box%3A%3Apin%28foo%28%29%29%2C+ready%28%28%29%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[select_fn]: https://docs.rs/futures/latest/futures/future/fn.select.html
+
+[select_fn_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AFutureExt%3B%0Ause+std%3A%3Afuture%3A%3Aready%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+%28_%2C+bar_future%29+%3D+futures%3A%3Afuture%3A%3Aselect%28bar%28%29.boxed%28%29%2C+ready%28%28%29%29%29%0A++++++++.await%0A++++++++.factor_first%28%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A++++bar_future.await%3B%0A%7D>
 
 ```rust
-let _ret = futures::future::select(Box::pin(foo()), ready(())).await;
-foo().await; // Deadlock!
+let (_, bar_future) = futures::future::select(bar().boxed(), ready(()))
+    .await
+    .factor_first();
+baz().await; // Deadlock!
+bar_future.await;
 ```
 
 #### `FutureExt::shared`
 
-([playground link][shared_deadlock])
+The [`.shared()`][shared] method lets us await a future behind an `Arc`, which
+is effectively a shared reference. We can use it to reproduce the
+cancellation-by-reference deadlock above ([playground link][shared_deadlock]):
 
-[shared_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AFutureExt%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+foo_future+%3D+foo%28%29.shared%28%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+foo_future.clone%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[shared]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.shared
+
+[shared_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AFutureExt%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+bar_future+%3D+bar%28%29.shared%28%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%285%29%2C+bar_future.clone%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
-let foo_future = foo().shared();
-_ = timeout(Duration::from_millis(1), foo_future.clone()).await;
-foo().await; // Deadlock!
+let bar_future = bar().shared();
+_ = timeout(Duration::from_millis(5), bar_future.clone()).await;
+baz().await; // Deadlock!
 ```
 
-#### `LocalSet`
+#### Userspace executors
 
-([playground link][localset_deadlock])
+[`FuturesUnordered`] is both a concurrent `Stream` and an executor, and those
+two things turn out to have a lot in common. Much like we can reproduce the
+stream deadlocks above [using `FuturesUnordered`][futures_unordered_deadlock],
+we can also get similar deadlocks using other executors. Here's Tokio's
+[`LocalSet`] ([playground link][localset_deadlock]):
 
-[localset_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+local+%3D+tokio%3A%3Atask%3A%3ALocalSet%3A%3Anew%28%29%3B%0A++++local.spawn_local%28foo%28%29%29%3B%0A++++local.run_until%28sleep%28Duration%3A%3Afrom_millis%281%29%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++foo%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[`LocalSet`]: https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html
+
+[localset_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+local+%3D+tokio%3A%3Atask%3A%3ALocalSet%3A%3Anew%28%29%3B%0A++++local.spawn_local%28bar%28%29%29%3B%0A++++local.run_until%28sleep%28Duration%3A%3Afrom_millis%285%29%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
 let local = tokio::task::LocalSet::new();
-local.spawn_local(foo());
-local.run_until(sleep(Duration::from_millis(1))).await;
-foo().await; // Deadlock!
+local.spawn_local(bar());
+local.run_until(sleep(Duration::from_millis(5))).await;
+baz().await; // Deadlock!
 ```
 
-#### unwinding from `block_on`
+We can also do this with the Tokio [`Runtime`] itself. We need to use the
+single-threaded version, so that `bar` doesn't keep running in the background
+([playground link][runtime_deadlock]):
 
-([playground link][unwinding_deadlock])
+[`Runtime`]: https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html
 
-[unwinding_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apanic%3A%3Acatch_unwind%3B%0Ause+std%3A%3Atime%3A%3ADuration%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0A%0Astatic+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A%0Aasync+fn+async_foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++tokio%3A%3Atime%3A%3Asleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Afn+sync_foo%28%29+%7B%0A++++%2F%2F+As+above%2C+but+sync+rather+than+async.%0A++++let+_guard+%3D+LOCK.blocking_lock%28%29%3B%0A++++std%3A%3Athread%3A%3Asleep%28Duration%3A%3Afrom_millis%2810%29%29%3B%0A%7D%0A%0Afn+main%28%29+%7B%0A++++%2F%2F+Build+a+single-threaded+runtime.+If+we+used+%60new_multi_thread%60+instead%2C+then+%60async_foo%60%0A++++%2F%2F+would+start+running+on+a+worker+thread+as+soon+as+we+spawned+it%2C+and+it+would+keep+running%0A++++%2F%2F+even+after+the+panic+below.+We+wouldn%27t+get+a+deadlock+in+that+case.+See%3A%0A++++%2F%2F+https%3A%2F%2Fdocs.rs%2Ftokio%2F1.53.1%2Ftokio%2Fruntime%2F%23driving-the-runtime%0A++++let+runtime+%3D+tokio%3A%3Aruntime%3A%3ABuilder%3A%3Anew_current_thread%28%29%0A++++++++.enable_time%28%29%0A++++++++.build%28%29%0A++++++++.unwrap%28%29%3B%0A%0A++++%2F%2F+Run+%60async_foo%60+in+the+background.+Execution+doesn%27t+actually+begin+until+%60block_on%60+below.%0A++++runtime.spawn%28async_foo%28%29%29%3B%0A%0A++++%2F%2F+Start+driving+the+runtime+with+%60block_on%60+and+a+second+future.+This+async+block+panics+after%0A++++%2F%2F+5+ms%2C+which+unwinds+out+of+%60block_on%60%2C+but+we+catch+the+panic+here+in+%60main%60.%0A++++_+%3D+catch_unwind%28%7C%7C+%7B%0A++++++++runtime.block_on%28async+%7B%0A++++++++++++tokio%3A%3Atime%3A%3Asleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++panic%21%28%22panic+while+%60async_foo%60+holds+%60LOCK%60%22%29%3B%0A++++++++%7D%29%3B%0A++++%7D%29%3B%0A%0A++++%2F%2F+At+this+point+the+%60async_foo%60+future+is+still+holding+%60LOCK%60%2C+but+we%27re+no+longer+driving%0A++++%2F%2F+the+runtime+that+owns+it.+If+we+try+to+take+%60LOCK%60+any+other+way+before+we+either+resume%0A++++%2F%2F+driving+%60runtime%60+or+drop+it%2C+we+get+a+deadlock.%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++sync_foo%28%29%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+[runtime_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Aruntime%3A%3ARuntime%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+main%28%29+%7B%0A++++%2F%2F+Build+a+single-threaded+runtime.+If+we+used+%60new_multi_thread%60+or+%60Runtime%3A%3Anew%60+here%2C+then%0A++++%2F%2F+%60bar%60+would+keep+running+after+the+first+%60block_on%60+returned%2C+and+we+wouldn%27t+get+a%0A++++%2F%2F+deadlock.+See%3A+https%3A%2F%2Fdocs.rs%2Ftokio%2F1.53.1%2Ftokio%2Fruntime%2F%23driving-the-runtime%0A++++let+runtime+%3D+tokio%3A%3Aruntime%3A%3ABuilder%3A%3Anew_current_thread%28%29%0A++++++++.enable_time%28%29%0A++++++++.build%28%29%0A++++++++.unwrap%28%29%3B%0A++++runtime.spawn%28bar%28%29%29%3B%0A++++runtime.block_on%28async+%7B%0A++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++%7D%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++Runtime%3A%3Anew%28%29.unwrap%28%29.block_on%28baz%28%29%29%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
 ```rust
-let runtime = tokio::runtime::Builder::new_current_thread()
-    .enable_time()
-    .build()
-    .unwrap();
-runtime.spawn(async_foo());
-_ = catch_unwind(|| {
+fn main() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.spawn(bar());
     runtime.block_on(async {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        panic!("panic while `async_foo` holds `LOCK`");
+        sleep(Duration::from_millis(5)).await;
     });
-});
-sync_foo(); // Deadlock!
+    Runtime::new().unwrap().block_on(baz()); // Deadlock!
+}
 ```
 
-#### TODO: poll! and poll_immediate
+#### `poll!`
+
+The [`poll!`] macro is somewhat low-level, but it's the most direct way to
+demonstrate these deadlocks ([playground link][poll_deadlock]):
+
+[`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
+
+[poll_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Apoll%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++_+%3D+poll%21%28bar_future%29%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rust
+let bar_future = pin!(bar());
+_ = poll!(bar_future);
+baz().await; // Deadlock!
+```
+
+Streams have a similar helper, [`poll_immediate`]
+([playground_link][poll_immediate_deadlock]):
+
+[`poll_immediate`]: https://docs.rs/futures/latest/futures/stream/fn.poll_immediate.html
+
+[poll_immediate_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3Apoll_immediate%3B%0Ause+futures%3A%3A%7BStreamExt%2C+stream%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+bar_stream+%3D+pin%21%28poll_immediate%28stream%3A%3Aonce%28bar%28%29%29%29%29%3B%0A++++_+%3D+bar_stream.next%28%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
+
+```rust
+let mut bar_stream = pin!(poll_immediate(stream::once(bar())));
+_ = bar_stream.next().await;
+baz().await; // Deadlock!
+```
 
 ### Pausing things is useful, and it would've been nice to allow it.
 
@@ -626,10 +676,10 @@ cleanup and by extension the borrow checker.
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-### What does a corrected version of the broken `main` function above look like?
+### How can we fix the `timeout` deadlock at the top?
 
-As a reminder, the broken `main` function from the motivation section looked
-like this ([playground link][timeout_deadlock]):
+As a reminder, the broken `main` function looked like this ([playground
+link][timeout_deadlock]):
 
 ```rust
 #[tokio::main]
@@ -644,9 +694,9 @@ async fn main() {
 
 We'd like to factor out the `baz` loop into its own `async` block and run it
 concurrently, but we can't [`join`] that block with `baz`, because it never
-returns. There are a few different ways we could approach this, but if we
-wanted to stick with existing, widely-used helpers, one option would be to use
-`select!` ([playgroud link][select_baz_loop]):[^cancellation_token]
+returns. If we wanted to stick with existing, widely-used helpers, one option
+here would be to use `select!` ([playgroud
+link][select_baz_loop]):[^cancellation_token]
 
 [`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 
@@ -682,10 +732,9 @@ finish, so the resulting behavior is correct, but `select!` doesn't really
 capture our intent. It would also be awkward if we needed the return value of
 `bar`.
 
-We could imagine a small helper function that might fit better, though it's not
-provided in `futures-rs` or Tokio today. It's job would be to drive two futures
-concurrently, but to only wait on the first one to finish. Let's call it
-`join_maybe`:
+We could also write a new helper function that fits this problem better. Let's
+call it `join_maybe`. It drives two futures concurrently, but it only waits for
+the first one to finish:
 
 ```rust
 /// Run a "definitely" future and a "maybe" future concurrently. If the definitely future finishes
@@ -697,7 +746,8 @@ async fn join_maybe<Fut1: Future, Fut2: Future>(
 ) -> (Fut1::Output, Option<Fut2::Output>) { ... }
 ```
 
-Here's what our `main` function looks like using `join_maybe` instead of `select!` ([playground link][join_maybe]):
+Here's what our `main` function looks like using `join_maybe` instead of
+`select!` ([playground link][join_maybe]):
 
 [join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
 
@@ -724,12 +774,9 @@ different ways. For an example of another macro in this space, see
 
 [join_me_maybe]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
 
-[^flexible]: If we reject examples that violate the new/clarified `Future`
-    contract in this RFC, `select!` becomes _considerably_ less flexible.
-    However, the combination of `if` guards, `biased`/fair modes, and
-    overlapping mutability in different arms (the arm bodies lower to a
-    `match`, and different match arms can mutate the same variables) is still
-    hard to compete with.
+[^flexible]: Some of the flexibility of `select!` depends on driving futures by
+    reference, in violation of the strict `Future` contract. If we don't allow
+    that, `select!` loses a lot of its flexibility.
 
 ### Can we enforce the `Future` contract programmatically?
 
