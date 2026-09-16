@@ -15,11 +15,11 @@ should never "pause" or ["snooze"][snooze] a future.
 
 There are widely used functions and patterns that violate this rule, including
 [`select!`]-by-reference and [`StreamExt::next`]. This RFC [identifies
-several](#a-lot-of-existing-code-violates-the-strict-future-contract), but it
-avoids endorsing any specific changes beyond the `Future` docs. The goal is to
-agree that existing contract violations are bugs, and that we can and should
-fix them, but deciding how exactly to fix or replace each problematic case is
-left to follow-up RFCs and the crates ecosystem.
+several](#a-lot-of-existing-code-snoozes-futures), but it avoids endorsing any
+specific changes beyond the `Future` docs. The goal is to agree that existing
+contract violations are bugs, and that we can and should fix them, but deciding
+how exactly to fix or replace each problematic case is left to follow-up RFCs
+and the crates ecosystem.
 
 ## Motivation
 [motivation]: #motivation
@@ -383,15 +383,89 @@ promptly.
 ## Drawbacks
 [drawbacks]: #drawbacks
 
-### A _lot_ of existing code violates the strict `Future` contract
+### Pausing things is useful, and it would've been nice to allow it.
+
+Some applications might want to pause low-priority work when load is high.
+Others might have an actual pause button (e.g. games, media) that they'd like
+to implement by pausing futures. Those might not be our recommended
+architectural choices, but effectively forbidding them at the language level
+seems quite opinionated.[^forbid]
+
+[^forbid]: Of course applications can ultimately do whatever they like,
+    including pausing futures or killing threads. Part of what's at stake here
+    is the question of who's "at fault" when such an application collides with
+    a library ecosystem that uses locks.
+
+Similarly, Windows has [`SuspendThread`] and [`TerminateThread`], and Unix has
+[`pthread_cancel`], because many applications over the years have wanted to
+non-cooperatively pause or cancel running threads.[^raymond_chen1] That's
+understandable; passing a cancel flag around everywhere is inconvenient at
+best, and it can be impossible when we're working with other people's code.
+However, today we understand that these functions are _radioactive_. Outside of
+a short list of low-level use cases, they tend to corrupt the entire
+process.[^raymond_chen2] We generally ban them.
+
+[^raymond_chen1]: "Originally, there was no `TerminateThread` function. The
+    original designers felt strongly that no such function should exist because
+    there was no safe way to terminate a thread, and there's no point having a
+    function that cannot be called safely. But people screamed that they needed
+    the `TerminateThread` function, even though it wasn't safe, so the
+    operating system designers caved and added the function because people
+    demanded it. Of course, those people who insisted that they needed
+    `TerminateThread` now regret having been given it." - [Raymond
+    Chen][raymond_chen1]
+
+[raymond_chen1]: https://devblogs.microsoft.com/oldnewthing/20150814-00/?p=91811
+
+[^raymond_chen2]: "These results are not specific to C#. The same logic applies
+    to Win32 or any other threading model. In Win32, the process heap is a
+    threadsafe object, and since it's hard to do very much in Win32 at all
+    without accessing the heap, suspending a thread in Win32 has a very high
+    chance of deadlocking your process." - [Raymond Chen][raymond_chen2]
+
+[raymond_chen2]: https://devblogs.microsoft.com/oldnewthing/20031209-00/?p=41573
+
+Unfortunately, pausing futures in async Rust has all the same problems. Taking
+an async lock is far less common than e.g. calling `malloc`, so the symptoms
+aren't as noticeable today, but they'll get worse as the ecosystem grows and
+private locks appear in more places. In [the original "Futurelock"
+incident][incident], the culprit was a semaphore buried in the
+`tokio::sync::mpsc` channel implementation. The channel in question wasn't even
+visible at the point where pausing happened. The non-local nature of these bugs
+forces us to take a position on pausing at the language/ecosystem level.
+
+[incident]: https://github.com/oxidecomputer/omicron/issues/9259
+
+Given all that, it's remarkable that non-cooperative[^noncoop] cancellation
+works as well as it does in async Rust. It [has its
+issues][cancelling_async_rust], but it doesn't generally cause deadlocks, and
+many applications use selects and timeouts routinely in production. That's
+quite an achievement, and perhaps an unexpected benefit of destructor-based
+cleanup and by extension the borrow checker.
+
+[^noncoop]: "Cooperative" vs "non-cooperative" has a couple different
+    interpretations here. From the perspective of an executor thread that's
+    calling `Future::poll`, everything is cooperative, because we can't force
+    that function to ever return. On the other hand, a `poll` function that
+    doesn't return promptly is gumming up the executor, and we have [tools for
+    finding those][slow_poll]. If we take it for granted that every long `poll`
+    bug eventually gets fixed, then we could think of cancellation in async
+    Rust as _non_-cooperative. There's nothing a correct `async fn` can do to
+    prevent it or delay it for very long.
+
+[slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
+
+[cancelling_async_rust]: https://sunshowers.io/posts/cancelling-async-rust/
+
+### A _lot_ of existing code snoozes futures
 
 There are many patterns in async Rust today that can fail to deliver wakeups,
 and we can come up with variants of the the deadlock above for each of them.
 For alternatives and proposed bugfixes, see the [Future
-possibilities](#future-possibilities) section. There's a lot of existing async
-Rust code that uses these patterns, and almost all of them need changes in the
-caller as part of a fix.[^exception] Even if we only added warnings for most of
-these, and no hard errors, that's a lot of proposed churn.
+possibilities](#future-possibilities) section, no pun intended. Tons of
+existing async Rust code uses these patterns, and most of it will need changes
+to the caller as part of a fix.[^exception] Even if in practice we only add
+warnings, that's a lot of proposed churn.
 
 [^exception]: The one likely exception is the `for_each` example in the
     [Concurrent streams](#concurrent-streams) section below. See RFC TODO.
@@ -609,80 +683,6 @@ let mut bar_stream = pin!(poll_immediate(stream::once(bar())));
 _ = bar_stream.next().await;
 baz().await; // Deadlock!
 ```
-
-### Pausing things is useful, and it would've been nice to allow it.
-
-Some applications might want to pause low-priority work when load is high.
-Others might have an actual pause button (e.g. games, media) that they'd like
-to implement by pausing futures. Those might not be our recommended
-architectural choices, but effectively forbidding them at the language level
-seems quite opinionated.[^forbid]
-
-[^forbid]: Of course applications can ultimately do whatever they like,
-    including pausing futures or killing threads. Part of what's at stake here
-    is the question of who's "at fault" when such an application collides with
-    a library ecosystem that uses locks.
-
-Similarly, Windows has [`SuspendThread`] and [`TerminateThread`], and Unix has
-[`pthread_cancel`], because many applications over the years have wanted to
-non-cooperatively pause or cancel running threads.[^raymond_chen1] That's
-understandable; passing a cancel flag around everywhere is inconvenient at
-best, and it can be impossible when we're working with other people's code.
-However, today we understand that these functions are _radioactive_. Outside of
-a short list of low-level use cases, they tend to corrupt the entire
-process.[^raymond_chen2] We generally ban them.
-
-[^raymond_chen1]: "Originally, there was no `TerminateThread` function. The
-    original designers felt strongly that no such function should exist because
-    there was no safe way to terminate a thread, and there's no point having a
-    function that cannot be called safely. But people screamed that they needed
-    the `TerminateThread` function, even though it wasn't safe, so the
-    operating system designers caved and added the function because people
-    demanded it. Of course, those people who insisted that they needed
-    `TerminateThread` now regret having been given it." - [Raymond
-    Chen][raymond_chen1]
-
-[raymond_chen1]: https://devblogs.microsoft.com/oldnewthing/20150814-00/?p=91811
-
-[^raymond_chen2]: "These results are not specific to C#. The same logic applies
-    to Win32 or any other threading model. In Win32, the process heap is a
-    threadsafe object, and since it's hard to do very much in Win32 at all
-    without accessing the heap, suspending a thread in Win32 has a very high
-    chance of deadlocking your process." - [Raymond Chen][raymond_chen2]
-
-[raymond_chen2]: https://devblogs.microsoft.com/oldnewthing/20031209-00/?p=41573
-
-Unfortunately, pausing futures in async Rust has all the same problems. Taking
-an async lock is far less common than e.g. calling `malloc`, so the symptoms
-aren't as noticeable today, but they'll get worse as the ecosystem grows and
-private locks appear in more places. In [the original "Futurelock"
-incident][incident], the culprit was a semaphore buried in the
-`tokio::sync::mpsc` channel implementation. The channel in question wasn't even
-visible at the point where pausing happened. The non-local nature of these bugs
-forces us to take a position on pausing at the language/ecosystem level.
-
-[incident]: https://github.com/oxidecomputer/omicron/issues/9259
-
-Given all that, it's remarkable that non-cooperative[^noncoop] cancellation
-works as well as it does in async Rust. It [has its
-issues][cancelling_async_rust], but it doesn't generally cause deadlocks, and
-many applications use selects and timeouts routinely in production. That's
-quite an achievement, and perhaps an unexpected benefit of destructor-based
-cleanup and by extension the borrow checker.
-
-[^noncoop]: "Cooperative" vs "non-cooperative" has a couple different
-    interpretations here. From the perspective of an executor thread that's
-    calling `Future::poll`, everything is cooperative, because we can't force
-    that function to ever return. On the other hand, a `poll` function that
-    doesn't return promptly is gumming up the executor, and we have [tools for
-    finding those][slow_poll]. If we take it for granted that every long `poll`
-    bug eventually gets fixed, then we could think of cancellation in async
-    Rust as _non_-cooperative. There's nothing a correct `async fn` can do to
-    prevent it or delay it for very long.
-
-[slow_poll]: https://docs.rs/tokio-metrics/latest/tokio_metrics/struct.TaskMonitor.html#method.with_slow_poll_threshold
-
-[cancelling_async_rust]: https://sunshowers.io/posts/cancelling-async-rust/
 
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
