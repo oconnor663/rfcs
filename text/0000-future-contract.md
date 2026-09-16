@@ -160,18 +160,18 @@ about your callers?[^spawn_task]
 For async locks to be usable -- or any type that contains one, like a
 [`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- we need a guarantee that
 callers will either deliver our wakeups or drop us promptly. The whole
-ecosystem needs to agree on this "strict" `Future` contract. In the example
-above, `main` is at fault for the deadlock, and the `Future` docs need to make
+ecosystem needs to agree to this "strict" `Future` contract. In the example
+above, `main` is violating the contract, and the `Future` docs need to make
 that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-Unfortunately, `main` doesn't _look_ broken. If we want the `Future` contract
-to have strict rules, we also need warnings and errors that let us know when we
-break those rules. Can we deprecate some problematic type or function that
-`main` is using? The natural suspect here is `timeout`.[^pin] Let's look at its
-[function signature][`timeout`]:
+Unfortunately, `main` doesn't _look_ broken. If the `Future` contract is going
+to have strict rules, we'll also need warnings and errors that let us know when
+we break those rules. Maybe we could deprecate some problematic type or
+function that `main` is using? The natural suspect here is `timeout`.[^pin]
+Let's look at its [function signature][`timeout`]:
 
 [at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
 
@@ -189,8 +189,8 @@ pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoF
 That signature shows us something important: `timeout` takes `future` _by
 value_. It winds up in some field of the [`Timeout`] struct, so when that
 struct drops, `future` drops too. In other words, if `duration` expires before
-`future` is finished, `timeout` cancels `future` by dropping it. That's exactly
-what the strict contract says it should do.
+`future` is finished, `timeout` cancels `future`, exactly like the strict
+contract says it should.
 
 [`Timeout`]: https://docs.rs/tokio/1.53.1/tokio/time/struct.Timeout.html
 
@@ -214,12 +214,13 @@ However, this RFC doesn't propose deprecating it today. For one thing, Rust
 doesn't currently have a way to deprecate a trait impl. Also, the same impl
 covers `Pin<Box<_>>`, which absolutely should implement `Future`. But most
 importantly, tons of existing async code uses `Pin<&mut _>` references as
-futures today, and it will take months to years to roll out helper functions
+futures today, and it will take months or years to roll out helper functions
 and macros that handle the same use cases with ownership instead. Also, while
 this is the most common way to violate the strict `Future` contract today, it's
 not the only way. `AsyncIterator` and `Stream` have similar deadlock bugs, and
 we'll need at least one follow-up RFC to address those. See the drawbacks
-section below for a list of related problems.
+section below for [a longer list of
+problems](#a-lot-of-existing-code-snoozes-futures).
 
 [^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
     includes both `Pin<&mut _>` and `Pin<Box<_>>`. The former is broken, but
