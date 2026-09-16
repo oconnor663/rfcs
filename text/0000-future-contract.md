@@ -14,11 +14,12 @@ should never "pause" or ["snooze"][snooze] a future.
 [`Future::poll`]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
 There are widely used functions and patterns that violate this rule, including
-[`select!`]-by-reference and [`StreamExt::next`]. This RFC identifies several,
-but it avoids endorsing any specific changes beyond the `Future` docs. The goal
-is to agree that existing contract violations are bugs, and that we can and
-should fix them, but deciding how exactly to fix or replace each problematic
-case is left to follow-up RFCs and the crates ecosystem.
+[`select!`]-by-reference and [`StreamExt::next`]. This RFC [identifies
+several](#a-lot-of-existing-code-violates-the-strict-future-contract), but it
+avoids endorsing any specific changes beyond the `Future` docs. The goal is to
+agree that existing contract violations are bugs, and that we can and should
+fix them, but deciding how exactly to fix or replace each problematic case is
+left to follow-up RFCs and the crates ecosystem.
 
 ## Motivation
 [motivation]: #motivation
@@ -238,8 +239,8 @@ we can start the gradual process of fixing them.
 The `poll` method imposes two responsibilities on its caller:
 
 1. If the last call to `poll` returned `Pending`, and the `Waker` passed to
-   that call is later invoked, and the future hasn't been dropped in the
-   meantime, the caller should **`poll` again promptly.**
+   that call is later invoked, and the future hasn't been dropped, the caller
+   should **`poll` again promptly.**
 
 2. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
    should **drop the future promptly**. Further calls to `poll` may panic or
@@ -308,11 +309,10 @@ fault for those bugs. There are three different ways we could fix it:
 Unlike threads, which have a life of their own once they start running, a
 future only makes progress when something polls it. We could effectively pause
 the execution of a future by not polling it again. However, the
-"`Poll::Pending` rule" above limits our options here. If a wakeup arrives, but
-we don't want to poll the future that triggered it[^unknown] -- for example
-because a deadline has passed, or because we no longer need its output -- we
-must drop that future promptly. When we drop a still-pending future, we call
-that "cancellation".
+"`Poll::Pending` rule" above generally forbids this. Whenever one of our child
+futures requests a wakeup,[^unknown] we must either poll it or drop it
+promptly. Dropping a future we don't want to poll anymore is called
+"cancellation".
 
 [^unknown]: It's possible to know which child (or children) triggered a given
     wakeup by giving each child a unique `Waker`. [`FuturesUnordered`] does
@@ -322,11 +322,11 @@ that "cancellation".
     polling until they return `Ready`, so both approaches are valid.
 
 This rule is essential for futures that acquire locks or other exclusive
-resources. When an async function holds a lock across an await point, the
-programmer needs to consider that it might release that lock sooner than
-expected if it's cancelled, or a bit later due to timer slack or CPU load. But
-the programmer doesn't need to worry about the caller pausing execution and
-thereby (accidentally, unknowingly) holding the lock _forever_.
+resources. When an async function takes a lock, the programmer needs to
+consider that it might release the lock sooner than expected if it's cancelled,
+or a bit later due to timer slack or CPU load. But because of the
+`Poll::Pending` rule, the programmer doesn't need to worry about the caller
+pausing execution and accidentally holding the lock _forever_.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -386,7 +386,15 @@ promptly.
 ### A _lot_ of existing code violates the strict `Future` contract
 
 There are many patterns in async Rust today that can fail to deliver wakeups,
-and we can come up with a version of the the deadlock above for each of them.
+and we can come up with variants of the the deadlock above for each of them.
+For alternatives and proposed bugfixes, see the [Future
+possibilities](#future-possibilities) section. There's a lot of existing async
+Rust code that uses these patterns, and almost all of them need changes in the
+caller as part of a fix.[^exception] Even if we only added warnings for most of
+these, and no hard errors, that's a lot of proposed churn.
+
+[^exception]: The one likely exception is the `for_each` example in the
+    [Concurrent streams](#concurrent-streams) section below. See RFC TODO.
 
 #### Cancellation by reference
 
@@ -481,9 +489,12 @@ baz().await; // Deadlock!
 ```
 
 We can also produce these deadlocks with consumers like [`for_each`] that take
-the stream by value ([playground link][concurrent_for_each_deadlock]):
+the stream by value ([playground link][concurrent_for_each_deadlock]):[^unique]
 
 [`for_each`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
+
+[^unique]: This is the only example in this section that could plausibly be
+    fixed internally, with no changes to the caller. See RFC TODO.
 
 [concurrent_for_each_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Astream%3A%3A%7Bself%2C+StreamExt+as+_%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0Ause+tokio_stream%3A%3AStreamExt+as+_%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++stream%3A%3Aonce%28bar%28%29%29%0A++++++++.merge%28stream%3A%3Aonce%28bar%28%29%29%29%0A++++++++.for_each%28async+%7C_%7C+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%29%0A++++++++.await%3B%0A%7D>
 
