@@ -139,8 +139,8 @@ That's a problem. Even when there aren't any locks involved, missed wakeups can
 cause performance issues, timeout errors, and UI stuttering. Most
 programmers<sup>\[citation needed\]</sup> expect `bar` and `baz` to run
 concurrently, and it's surprising and confusing that they don't. This RFC
-focuses on deadlocks for clarity, but less dramatic bugs are also [common in
-practice][barbara].
+focuses on deadlocks for clarity, but those less dramatic bugs are also common
+in practice.
 
 Consider the deadlock problem from the perspective of a programmer writing
 `foo`. You're acquiring `LOCK`, and it's your responsibility not to hold it for
@@ -171,59 +171,33 @@ fault for the deadlock, and the `Future` docs need to make that clear.
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-Unfortunately, `main` doesn't _look_ broken. If the `Future` contract is going
-to have strict rules, we'll also need warnings and errors that let us know when
-we break those rules. Maybe we could deprecate some problematic type or
-function that `main` is using? The natural suspect here is `timeout`.[^pin]
-Let's look at its [function signature][`timeout`]:
+If `main` is broken, we'd strongly prefer to have a warning or an error telling
+us that. (We also had better be able to fix it. See [the rationales
+section](#correcting-main).) The root of all evil in `main` is arguably [the
+blanket `Future` impl for `Pin<&mut _>` references][blanket],[^pin] which says
+that a `Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
+dropping it has no effect. If the `Future` contract requires us to drop
+cancelled futures promptly, then that blanket impl is also broken, and we could
+consider warning on any use of it.
 
-[at its signature]: https://docs.rs/tokio/1.53.1/src/tokio/time/timeout.rs.html#86-98
-
-[^pin]: `pin!` is arguably a red flag, but pinning per se doesn't have anything
-    to do with control flow or wakeups. We often manage heterogenous futures as
-    `Pin<Box<dyn Future>>`, but we can also [abuse one of those][boxed] to
-    replace `pin!` in this example.
+[^pin]: `pin!` is arguably also a red flag, but pinning per se doesn't have
+    anything to do with control flow or wakeups. We often manage heterogenous
+    futures with `Pin<Box<dyn Future>>`, and we can [abuse one of those][boxed]
+    to replace `pin!` in this example.
 
 [boxed]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AFutureExt%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+bar%28%29.boxed%28%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
-```rust
-pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
-```
-
-That signature shows us something important: `timeout` takes `future` _by
-value_. It winds up in some field of the [`Timeout`] struct, so when that
-struct drops, `future` drops too. In other words, if `duration` expires before
-`future` is finished, `timeout` cancels `future`, exactly like the strict
-contract says it should.
-
-[`Timeout`]: https://docs.rs/tokio/1.53.1/tokio/time/struct.Timeout.html
-
-But then, why didn't that prevent our deadlock above? We didn't actually pass
-the `bar` future to `timeout` by value.[^compiler_error] Instead, we used a
-`&mut Pin<&mut _>` reference. The question is, why did that compile? There are
-several blanket impls involved, but the most important one is [the `Future`
-impl for `Pin<&mut _>` references][blanket]. In effect, a `Pin<&mut _>`
-reference to a `Future` is itself a `Future`, except that dropping it has no
-effect. If the strict `Future` contract requires us to drop cancelled futures
-promptly, then that blanket impl is broken.
-
-[^compiler_error]: Also, if we passed `bar` to `timeout` by value, our loop
-    wouldn't compile. The compiler would force us to create a new `bar` future
-    in each loop iteration. That's deadlock-free, but it's not the behavior we
-    want here. See [the rationales
-    section](#how-can-we-fix-the-timeout-deadlock-at-the-top) for examples of
-    implementing the behavior we want correctly.
-
-However, this RFC doesn't propose deprecating it today. For one thing, Rust
-doesn't currently have a way to deprecate a trait impl. Also, the same impl
-covers `Pin<Box<_>>`, which absolutely should implement `Future`. But most
+However, this RFC doesn't propose deprecating that blanket impl today. For one
+thing, Rust doesn't currently have a way to deprecate a trait impl. Also, the
+same impl covers `Pin<Box<_>>`, which does need to implement `Future`. But most
 importantly, tons of existing async code uses `Pin<&mut _>` references as
 futures today, and it will take months or years to roll out helper functions
-and macros that handle the same use cases with ownership instead. Also, while
-this is the most common way to violate the strict `Future` contract today, it's
-not the only way. `AsyncIterator` and `Stream` have similar deadlock bugs, and
-we'll need at least one follow-up RFC to address those. See the drawbacks
-section below for [a longer list of
+and macros that handle the same use cases with ownership instead. (Again see
+[the rationales section](#correcting-main) on how to fix `main` and what helper
+functions we might need.) Also, while this is the most common way to violate
+the strict `Future` contract today, it's not the only way. `AsyncIterator` and
+`Stream` have similar deadlock bugs, and we'll need at least one follow-up RFC
+to address those. See the drawbacks section below for [a longer list of
 problems](#a-lot-of-existing-code-snoozes-futures).
 
 [^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
@@ -607,7 +581,7 @@ bar_future.await;
 #### `FutureExt::shared`
 
 The [`.shared()`][shared] method lets us await a future behind an `Arc`, which
-is effectively a shared reference. We can use it to reproduce the
+acts like a shared reference. We can use it to reproduce the
 cancellation-by-reference deadlock above ([playground link][shared_deadlock]):
 
 [shared]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.shared
@@ -692,10 +666,10 @@ baz().await; // Deadlock!
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-### How can we fix the `timeout` deadlock at the top?
+### Correcting `main`
 
-As a reminder, the broken `main` function looked like this ([playground
-link][timeout_deadlock]):
+As a reminder, the broken `main` function in the `timeout` deadlock above looks
+like this ([playground link][timeout_deadlock]):
 
 ```rust
 #[tokio::main]
@@ -832,6 +806,10 @@ for correctness.
 
 [`futures_lite::future::Zip`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.zip.html
 [zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
+
+### Could we statically identify futures that hold locks?
+
+TODO: no
 
 ## Prior art
 [prior-art]: #prior-art
