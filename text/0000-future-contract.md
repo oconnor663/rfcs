@@ -105,10 +105,12 @@ async fn main() {
 }
 ```
 
-While control is waiting on `baz()`, nothing is polling `bar_future`. But
-`bar_future` is already holding the lock that `baz` wants to acquire, and the
-result is a deadlock. Let's look closely at who gets polled when. If we [add
-some prints][squawk], we can see that `main` gets polled three times:[^slack]
+`bar_future` is holding the lock that `baz` wants to acquire. Either polling it
+or dropping it would release the lock, but `main` doesn't do either of those
+things while it's waiting on `baz`, so it's deadlocked.
+
+Let's look closely at who gets polled when. If we [add some prints][squawk], we
+can see that `main` gets polled three times:[^slack]
 
 [squawk]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+Instant%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+main_inner%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D%0A%0A%2F%2F+Squawk+a+timestamp+every+time+%60future%60+gets+polled.%0Afn+squawk%3CFut%3A+Future%3E%28future%3A+Fut%29+-%3E+impl+Future%3COutput+%3D+Fut%3A%3AOutput%3E+%7B%0A++++let+start+%3D+Instant%3A%3Anow%28%29%3B%0A++++let+mut+future+%3D+Box%3A%3Apin%28future%29%3B%0A++++std%3A%3Afuture%3A%3Apoll_fn%28move+%7Ccx%7C+%7B%0A++++++++let+elapsed+%3D+Instant%3A%3Aelapsed%28%26start%29.as_secs_f32%28%29+*+1000.0%3B%0A++++++++println%21%28%22%5B%7Belapsed%3A.3%7D+ms%5D+POLLED%21%22%29%3B%0A++++++++future.as_mut%28%29.poll%28cx%29%0A++++%7D%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++squawk%28main_inner%28%29%29.await%3B%0A%7D>
 
@@ -130,39 +132,41 @@ some prints][squawk], we can see that `main` gets polled three times:[^slack]
 
 [tokio_timer]: https://tokio.rs/blog/2018-03-timers
 
-We re-poll `baz` at 10 ms, even though it didn't request a wakeup. That's not
-in and of itself a problem; futures are expected to tolerate extra polling. But
-`bar` did request a wakeup, and `main` doesn't poll it. That's a problem.[^hang]
+`main` re-polls `baz` at 10 ms, even though `baz` didn't request a wakeup.
+That's not in and of itself a problem; pending futures are expected to tolerate
+extra polling. But `bar` did request a wakeup, and `main` doesn't poll it.
+That's a problem. Even when there aren't any locks involved, missed wakeups can
+cause performance issues, timeout errors, and UI stuttering. Most
+programmers<sup>\[citation needed\]</sup> expect `bar` and `baz` to run
+concurrently, and it's surprising and confusing that they don't. This RFC
+focuses on deadlocks for clarity, but less dramatic bugs are also [common in
+practice][barbara].
 
-[^hang]: Even if there was no lock in this example, and thus no deadlock, it's
-    still surprising that `bar` is paused every time we call `baz`. Most users
-    in this situation expect them to run concurrently, except in [rare cases
-    involving complicated mutation][mini_redis]. Snoozing futures in a real
-    application can cause performance issues, network timeout errors, or UI
-    stuttering. This RFC focuses on deadlocks for clarity, but these other bugs
-    are also [common in practice][barbara].
-
-Consider the problem from the perspective of the programmer writing `foo`.
-You're acquiring `LOCK`, and it's your responsibility not to hold it for too
-long. If you do any blocking IO while you hold it, you're trusting the runtime
-to trigger your wakeup correctly. That's fine; you naturally rely on the
-runtime for correctness, just like you rely on the standard library and the
+Consider the deadlock problem from the perspective of a programmer writing
+`foo`. You're acquiring `LOCK`, and it's your responsibility not to hold it for
+too long. If you do any blocking IO while you hold it, you're trusting the
+runtime to trigger your wakeup correctly. That's fine; you naturally rely on
+the runtime for correctness, just like you rely on the standard library and the
 compiler. But then, you're also trusting your callers to deliver that wakeup.
 Is that fine? What if you're writing library code, and you don't know anything
 about your callers?[^spawn_task]
 
 [^spawn_task]: Futures spawned as tasks get their wakeups directly from the
-    runtime, so spawning a task is one way to guarantee our wakeups will arrive
-    without trusting unknown callers. But spawning isn't a general-purpose
-    solution for these issues. It requires heap allocation, it isn't supported
-    in all environments, and it isn't compatible with local borrowing.
+    runtime, so spawning is one way to guarantee our wakeups will arrive
+    without trusting unknown callers. But spawning isn't always an option,
+    because it isn't supported in all environments, and it's not compatible
+    with local borrowing. The [`moro`] crate solves the local borrowing
+    problem(!), but its wakeups come through the caller and not directly from
+    the runtime, so it doesn't help here.
+
+[`moro`]: https://github.com/nikomatsakis/moro
 
 For async locks to be usable -- or any type that contains one, like a
 [`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- we need a guarantee that
-callers will either deliver our wakeups or drop us promptly. The whole
-ecosystem needs to agree to this "strict" `Future` contract. In the example
-above, `main` is violating the contract, and the `Future` docs need to make
-that clear.
+callers will either deliver our wakeups or drop us promptly. If that doesn't
+happen, we need everyone to agree that it's the caller's fault for breaking the
+rules and not our fault for trusting them. In the example above, `main` is at
+fault for the deadlock, and the `Future` docs need to make that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
