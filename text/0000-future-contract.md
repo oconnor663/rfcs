@@ -13,13 +13,13 @@ should never "pause" or ["snooze"][snooze] a future.
 
 [`Future::poll`]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
 
-There are widely used functions and patterns that violate this rule, including
-[`select!`]-by-reference and [`StreamExt::next`]. This RFC [identifies
-several](#a-lot-of-existing-code-snoozes-futures), but it avoids endorsing any
-specific changes beyond the `Future` docs. The goal is to agree that existing
-contract violations are bugs, and that we can and should fix them, but deciding
-how exactly to fix or replace each problematic case is left to follow-up RFCs
-and the crates ecosystem.
+There are widely used functions and patterns that violate this "strict"
+`Future` contract, including [`select!`]-by-reference and [`StreamExt::next`].
+This RFC [identifies several](#a-lot-of-existing-code-snoozes-futures), but it
+avoids endorsing any specific changes beyond the `Future` docs. The goal is to
+agree that existing violations are bugs, and that we can and should fix them,
+but deciding how exactly to fix or replace each problematic case is left to
+follow-up RFCs and the crates ecosystem.
 
 ## Motivation
 [motivation]: #motivation
@@ -135,12 +135,8 @@ can see that `main` gets polled three times:[^slack]
 `main` re-polls `baz` at 10 ms, even though `baz` didn't request a wakeup.
 That's not in and of itself a problem; pending futures are expected to tolerate
 extra polling. But `bar` did request a wakeup, and `main` doesn't poll it.
-That's a problem. Even when there aren't any locks involved, missed wakeups can
-cause performance issues, timeout errors, and UI stuttering. Most
-programmers<sup>\[citation needed\]</sup> expect `bar` and `baz` to run
-concurrently, and it's surprising and confusing that they don't. This RFC
-focuses on deadlocks for clarity, but those less dramatic bugs are also common
-in practice.
+That's a problem. This RFC focuses on deadlocks for clarity, but missed wakeups
+can also cause performance issues, timeout errors, and UI stuttering.
 
 Consider the deadlock problem from the perspective of a programmer writing
 `foo`. You're acquiring `LOCK`, and it's your responsibility not to hold it for
@@ -162,23 +158,25 @@ about your callers?[^spawn_task]
 [`moro`]: https://github.com/nikomatsakis/moro
 
 For async locks to be usable -- or any type that contains one, like a
-[`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- we need a guarantee that
-callers will either deliver our wakeups or drop us promptly. If that doesn't
-happen, we need everyone to agree that it's the caller's fault for breaking the
-rules and not our fault for trusting them. In the example above, `main` is at
-fault for the deadlock, and the `Future` docs need to make that clear.
+[`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- you need a guarantee that
+callers will either deliver your wakeups or drop you promptly. If that doesn't
+happen, everyone else needs to agree that it's the caller's fault for breaking
+the rules and not your fault for trusting them. In the example above, `main` is
+at fault for the deadlock, and we need to document the "strict" `Future`
+contract to make that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-If `main` is broken, we'd strongly prefer to have a warning or an error telling
-us that. (We also had better be able to fix it. See [the rationales
-section](#correcting-main).) The root of all evil in `main` is arguably [the
-blanket `Future` impl for `Pin<&mut _>` references][blanket],[^pin] which says
-that a `Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
-dropping it has no effect. If the `Future` contract requires us to drop
-cancelled futures promptly, then that blanket impl is also broken, and we could
-consider warning on any use of it.
+At the same time, if `main` is broken, we'd strongly prefer to have some
+warning or error telling us that. (Also there had better be some way to fix it.
+See [the rationales section][fixing_main].) The root of all evil in this case
+is arguably [the blanket `Future` impl for `Pin<&mut _>`
+references][blanket],[^pin] which says that a `Pin<&mut _>` reference to a
+`Future` is itself a `Future`, except that dropping it has no effect. That impl
+is what lets us call `timeout` with a reference to `bar_future`. If the strict
+`Future` contract requires us to drop cancelled futures promptly, then that
+impl is also broken, and we should deprecate it.
 
 [^pin]: `pin!` is arguably also a red flag, but pinning per se doesn't have
     anything to do with control flow or wakeups. We often manage heterogenous
@@ -187,17 +185,16 @@ consider warning on any use of it.
 
 [boxed]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AFutureExt%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+bar%28%29.boxed%28%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
-However, this RFC doesn't propose deprecating that blanket impl today. For one
-thing, Rust doesn't currently have a way to deprecate a trait impl. Also, the
+However, this RFC doesn't propose deprecating it today. For one thing, Rust
+doesn't currently have a way to deprecate a trait impl. More importantly, the
 same impl covers `Pin<Box<_>>`, which does need to implement `Future`. But most
-importantly, tons of existing async code uses `Pin<&mut _>` references as
-futures today, and it will take months or years to roll out helper functions
-and macros that handle the same use cases with ownership instead. (Again see
-[the rationales section](#correcting-main) on how to fix `main` and what helper
-functions we might need.) Also, while this is the most common way to violate
-the strict `Future` contract today, it's not the only way. `AsyncIterator` and
-`Stream` have similar deadlock bugs, and we'll need at least one follow-up RFC
-to address those. See the drawbacks section below for [a longer list of
+importantly, lots of existing async code uses `Pin<&mut _>` references as
+futures today, and it will take months or years to roll out [new helper
+functions and macros][fixing_main] that let us handle the same use cases with
+ownership instead. Also, while this is the most common way to violate the
+strict `Future` contract today, it's not the only way. [`AsyncIterator`] and
+[`Stream`] have similar deadlock bugs, and we'll need at least one follow-up
+RFC to address those. See the drawbacks section below for [a longer list of
 problems](#a-lot-of-existing-code-snoozes-futures).
 
 [^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
@@ -207,8 +204,8 @@ problems](#a-lot-of-existing-code-snoozes-futures).
     whole impl.
 
 Instead, this RFC proposes the smallest possible change: Document the strict
-`Future` contract. Once we agree on exactly where these bugs are coming from,
-we can start the gradual process of fixing them.
+`Future` contract. Once we agree about where the bugs are, we can start the
+long and gradual process of fixing them.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -235,8 +232,9 @@ The `poll` method imposes two responsibilities on its caller:
 
 #### Example
 
-Here's an example of a `Future` implementation that fails the first requirement
-above, a.k.a. the "`Poll::Pending` rule":
+Here's an example of a future that fails the first requirement above, a.k.a.
+the "`Poll::Pending` rule". Every time this future is polled, it flips a coin
+to decide whether to poll its child:
 
 ```rust
 pub struct CoinFlip<Fut>(Pin<Box<Fut>>);
@@ -416,8 +414,8 @@ forces us to take a position on pausing at the language/ecosystem level.
 [incident]: https://github.com/oxidecomputer/omicron/issues/9259
 
 Given all that, it's remarkable that non-cooperative[^noncoop] cancellation
-works as well as it does in async Rust. It [has its
-issues][cancelling_async_rust], but it doesn't generally cause deadlocks, and
+works as well as it does in async Rust. [It has its
+issues,][cancelling_async_rust] but it doesn't generally cause deadlocks, and
 many applications use selects and timeouts routinely in production. That's
 quite an achievement, and perhaps an unexpected benefit of destructor-based
 cleanup and by extension the borrow checker.
@@ -443,8 +441,8 @@ and we can come up with variants of the the deadlock above for each of them.
 For alternatives and proposed bugfixes, see the [Future
 possibilities](#future-possibilities) section, no pun intended. Tons of
 existing async Rust code uses these patterns, and most of it will need changes
-to the caller as part of a fix.[^exception] Even if in practice we only add
-warnings, that's a lot of proposed churn.
+to the caller as part of a fix.[^exception] Even if we only add warnings for
+most of these, that's a lot of proposed churn.
 
 [^exception]: The one likely exception is the `for_each` example in the
     [Concurrent streams](#concurrent-streams) section below. See RFC TODO.
@@ -597,9 +595,9 @@ baz().await; // Deadlock!
 #### Userspace executors
 
 [`FuturesUnordered`] is both a concurrent `Stream` and an executor, and those
-two things turn out to have a lot in common. Much like we can reproduce the
-stream deadlocks above [using `FuturesUnordered`][futures_unordered_deadlock],
-we can also get similar deadlocks using other executors. Here's Tokio's
+two things turn out to have a lot in common. Much like we can [reproduce the
+stream deadlocks above using `FuturesUnordered`][futures_unordered_deadlock],
+we can also produce similar deadlocks using other executors. Here's Tokio's
 [`LocalSet`] ([playground link][localset_deadlock]):
 
 [`LocalSet`]: https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html
@@ -613,7 +611,7 @@ local.run_until(sleep(Duration::from_millis(5))).await;
 baz().await; // Deadlock!
 ```
 
-We can also do this with the Tokio [`Runtime`] itself. We need to use the
+We can also do this with the Tokio [`Runtime`] itself. We need the
 single-threaded version, so that `bar` doesn't keep running in the background
 ([playground link][runtime_deadlock]):
 
@@ -666,7 +664,8 @@ baz().await; // Deadlock!
 ## Rationale and alternatives
 [rationale-and-alternatives]: #rationale-and-alternatives
 
-### Correcting `main`
+### Fixing `main`
+[fixing_main]: #fixing-main
 
 As a reminder, the broken `main` function in the `timeout` deadlock above looks
 like this ([playground link][timeout_deadlock]):
@@ -889,6 +888,7 @@ TODO: `AsyncIterator`
 [`select!`]: https://tokio.rs/tokio/tutorial/select
 [`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 [`AsyncIterator`]: https://doc.rust-lang.org/core/async_iter/trait.AsyncIterator.html
+[`Stream`]: https://docs.rs/futures/latest/futures/prelude/trait.Stream.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 [`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
