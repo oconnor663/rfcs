@@ -30,7 +30,7 @@ of those things tends to cause deadlocks.[^deprecated] Async cancellation
 solves the deadlock problem(!) by dropping cancelled futures, which
 automatically releases any locks they might be holding. But async pausing does
 not solve the deadlock problem, which makes it more of a bug than a feature.
-For a case study in how difficult and non-local these deadlocks can be, see
+For a case study in how difficult and non-local these bugs can be, see
 ["Futurelock"] (Oxide, October 2025).
 
 [^deprecated]: Lots of languages have old APIs for killing or suspending
@@ -49,10 +49,10 @@ For a case study in how difficult and non-local these deadlocks can be, see
 
 Another problem with async pausing is that, although we almost never do it
 explicitly,[^dioxus] we often do it implicitly, and it's surprisingly easy to
-do it accidentally. Futurelock was caused by a snoozing bug [in a `select!`
+do it accidentally. Futurelock was caused by a snoozing mistake [in a `select!`
 loop][futurelock_select], and async streams have been [battling hangs and
-deadlocks][barbara] for years. These mistakes are invisible unless you know
-exactly what you're looking for.
+deadlocks][barbara] for years. These bugs are invisible unless you know exactly
+what you're looking for.
 
 [^dioxus]: The only widely-used counterexample might be the Dioxus framework,
     which [provides a `pause` method][dioxus_docs] and sometimes [calls it
@@ -160,23 +160,23 @@ about your callers?[^spawn_task]
 For async locks to be usable -- or any type that contains one, like a
 [`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- you need a guarantee that
 callers will either deliver your wakeups or drop you promptly. If that doesn't
-happen, everyone else needs to agree that it's the caller's fault for breaking
-the rules and not your fault for trusting them. In the example above, `main` is
-at fault for the deadlock, and we need to document the "strict" `Future`
-contract to make that clear.
+happen, it should be the caller's fault for breaking the rules and not your
+fault for trusting them. We need to document the "strict" `Future` contract to
+make it clear that `main` is at fault for this deadlock.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
 
-At the same time, if `main` is broken, we'd strongly prefer to have some
-warning or error telling us that. (Also there had better be some way to fix it.
-See [the rationales section][fixing_main].) The root of all evil in this case
-is arguably [the blanket `Future` impl for `Pin<&mut _>`
+At the same time, if `main` is broken, we'd strongly prefer to have a warning
+or error tell us that. (There had better be a way to fix it too. See [the
+rationales section][fixing_main].) The root of all evil in this case is
+arguably [the blanket `Future` impl for `Pin<&mut _>`
 references][blanket],[^pin] which says that a `Pin<&mut _>` reference to a
 `Future` is itself a `Future`, except that dropping it has no effect. That impl
 is what lets us call `timeout` with a reference to `bar_future`. If the strict
 `Future` contract requires us to drop cancelled futures promptly, then that
-impl is also broken, and we should deprecate it.
+impl is also broken, and we should deprecate it. A deprecation warning would
+make it clear that `main` is doing something wrong.
 
 [^pin]: `pin!` is arguably also a red flag, but pinning per se doesn't have
     anything to do with control flow or wakeups. We often manage heterogenous
@@ -185,17 +185,17 @@ impl is also broken, and we should deprecate it.
 
 [boxed]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3AFutureExt%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+bar%28%29.boxed%28%29%3B%0A++++while+timeout%28Duration%3A%3Afrom_millis%285%29%2C+%26mut+bar_future%29.await.is_err%28%29+%7B%0A++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++baz%28%29.await%3B%0A++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++%7D%0A%7D>
 
-However, this RFC doesn't propose deprecating it today. For one thing, Rust
-doesn't currently have a way to deprecate a trait impl. More importantly, the
-same impl covers `Pin<Box<_>>`, which does need to implement `Future`. But most
-importantly, lots of existing async code uses `Pin<&mut _>` references as
-futures today, and it will take months or years to roll out [new helper
-functions and macros][fixing_main] that let us handle the same use cases with
-ownership instead. Also, while this is the most common way to violate the
-strict `Future` contract today, it's not the only way. [`AsyncIterator`] and
-[`Stream`] have similar deadlock bugs, and we'll need at least one follow-up
-RFC to address those. See the drawbacks section below for [a longer list of
-problems](#a-lot-of-existing-code-snoozes-futures).
+However, this RFC doesn't propose deprecating that blanket impl today. For one
+thing, Rust doesn't currently have a way to deprecate a trait impl. More
+importantly, the same impl covers `Pin<Box<_>>`, which does need to implement
+`Future`. But most importantly, lots of existing async code uses `Pin<&mut _>`
+references as futures today, and it will take months or years to roll out [new
+helper functions and macros][fixing_main] that let us handle the same use cases
+with ownership instead. Also, while await-by-reference is the most common way
+to violate the strict `Future` contract today, it's not the only way.
+[`AsyncIterator`] and [`Stream`] have similar deadlock bugs, and we'll need at
+least one follow-up RFC to address those. See the drawbacks section below for
+[a longer list of problems](#a-lot-of-existing-code-snoozes-futures).
 
 [^box]: That impl covers all `Pin<P> where P: DerefMut<Target: Future>`, which
     includes both `Pin<&mut _>` and `Pin<Box<_>>`. The former is broken, but
@@ -203,9 +203,9 @@ problems](#a-lot-of-existing-code-snoozes-futures).
     ignoring backwards compatibility concerns, we don't want to deprecate the
     whole impl.
 
-Instead, this RFC proposes the smallest possible change: Document the strict
-`Future` contract. Once we agree about where the bugs are, we can start the
-long and gradual process of fixing them.
+Instead of trying to fix everything all at once, this RFC proposes the smallest
+possible change: Document the strict `Future` contract. Once we agree about
+where the bugs are, we can start the long and gradual process of fixing them.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -683,15 +683,14 @@ async fn main() {
 
 We'd like to factor out the `baz` loop into its own `async` block and run it
 concurrently, but we can't [`join`] that block with `baz`, because it never
-returns. If we wanted to stick with existing, widely-used helpers, one option
-here would be to use `select!` ([playgroud
-link][select_baz_loop]):[^cancellation_token]
+returns. If we want to stick with existing, widely-used helpers, we can use
+`select!` ([playgroud link][select_baz_loop]):[^cancellation_token]
 
 [`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 
-[^cancellation_token]: Another option is to wrap the `baz` loop with a
-    [`CancellationToken`], though that's easier to get wrong, and it also uses
-    heap allocation internally.
+[^cancellation_token]: Another widely-used option is a [`CancellationToken`],
+    but that's easier to get wrong, and it also uses heap allocation
+    internally.
 
 [`CancellationToken`]: https://docs.rs/tokio-util/latest/tokio_util/sync/struct.CancellationToken.html
 
@@ -714,16 +713,16 @@ async fn main() {
 }
 ```
 
-This works, and it's nice that it doesn't require `pin!`. But a downside of
-this approach is that `select!` makes it look like we're waiting for either
-`bar` or the `baz_loop` to finish. We know that the `baz_loop` will never
-finish, so the resulting behavior is correct, but `select!` doesn't really
-capture our intent. It would also be awkward if we needed the return value of
-`bar`.
+This works, and it's nice (and not a coincidence) that it doesn't require
+`pin!`. But a downside of this approach is that it looks like we're waiting for
+either `bar` or the `baz_loop` to finish. We know that the `baz_loop` will
+never finish, so the resulting behavior is correct, but `select!` doesn't
+really capture our intent. It would also be awkward if we needed the return
+value of `bar`.
 
-We could also write a new helper function that fits this problem better. Let's
-call it `join_maybe`. It drives two futures concurrently, but it only waits for
-the first one to finish:
+We could imagine a new helper function that fits this problem better. It would
+drive two futures concurrently, but only wait for the first one to finish.
+Let's call it `join_maybe`:
 
 ```rust
 /// Run a "definitely" future and a "maybe" future concurrently. If the definitely future finishes
@@ -735,7 +734,7 @@ async fn join_maybe<Fut1: Future, Fut2: Future>(
 ) -> (Fut1::Output, Option<Fut2::Output>) { ... }
 ```
 
-Here's what our `main` function looks like using `join_maybe` instead of
+Here's what our `main` function would look like using `join_maybe` instead of
 `select!` ([playground link][join_maybe]):
 
 [join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
@@ -756,9 +755,9 @@ async fn main() {
 
 That's a bit cleaner. But note that the `select!` macro is [extremely
 flexible][mini_redis],[^flexible] and this is just one of its simplest use
-cases. There's a wide open design space for other helper functions that mix
-joining, selecting, cancellation, shared mutability, and `no_std` support in
-different ways. For an example of another macro in this space, see
+cases. There's a wide open design space for other helpers that mix joining,
+selecting, cancellation, shared mutability, error handling, and `no_std`
+support in different ways. For an example of another macro in this space, see
 [`join_me_maybe::join!`][join_me_maybe].
 
 [join_me_maybe]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
