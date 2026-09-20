@@ -158,9 +158,10 @@ about your callers?[^spawn_task]
 For async locks to be usable -- or any type that contains one, like a
 [`OnceCell`] or a [bounded `mpsc` channel][mpsc] -- you need a guarantee that
 callers will either deliver your wakeups or drop you promptly. If that doesn't
-happen, it should be the caller's fault for breaking the rules and not your
-fault for trusting them. We need to document the "strict" `Future` contract to
-make it clear that `main` is at fault for this deadlock.
+happen, it has to be the caller's fault for breaking the rules and not your
+fault for trusting them. We need to agree that `main` is at fault for the
+deadlock above, and the `Future` trait needs to document a "strict" contract to
+make that clear.
 
 [`OnceCell`]: https://docs.rs/tokio/latest/tokio/sync/struct.OnceCell.html
 [mpsc]: https://docs.rs/tokio/latest/tokio/sync/mpsc/index.html
@@ -186,7 +187,7 @@ make it clear that `main` is doing something wrong.
 However, this RFC doesn't propose deprecating that blanket impl today. For one
 thing, Rust doesn't currently have a way to deprecate a trait impl. More
 importantly, the same impl covers `Pin<Box<_>>`, which does need to implement
-`Future`. But most importantly, lots of existing async code uses `Pin<&mut _>`
+`Future`. But most of all, lots of existing async code uses `Pin<&mut _>`
 references as futures today, and it will take months or years to roll out [new
 helper functions and macros][fixing_main] that let us handle the same use cases
 with ownership instead. Also, while this sort of
@@ -369,8 +370,8 @@ seems quite opinionated.[^forbid]
 
 [^forbid]: Of course applications can ultimately do whatever they like,
     including pausing futures or killing threads. Part of what's at stake here
-    is the question of who's "at fault" when such an application collides with
-    a library ecosystem that uses locks.
+    is the question of who's at fault when such an application collides with a
+    library ecosystem that uses locks.
 
 Similarly, Windows has [`SuspendThread`] and [`TerminateThread`], and Unix has
 [`pthread_cancel`], because many applications over the years have wanted to
