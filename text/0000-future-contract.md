@@ -845,7 +845,12 @@ struct AsyncLockGuard<'a, T> {
 ## Prior art
 [prior-art]: #prior-art
 
-TODO
+- ["Footgun lurking in `FuturesUnordered` and other concurrency-enabling streams"](https://github.com/rust-lang/futures-rs/issues/2387)
+- ["Barbara battles buffered streams"][barbara]
+- ["`for await` and the battle of buffered streams"](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
+- ["Future's liveness problem"](https://skepfyr.me/blog/futures-liveness-problem/)
+- ["Futurelock"]
+- ["Never snooze a future"][snooze]
 
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
