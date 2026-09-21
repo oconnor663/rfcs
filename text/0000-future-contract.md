@@ -409,7 +409,8 @@ private locks appear in more places. In [the original "Futurelock"
 incident][incident], the culprit was a semaphore buried in the
 `tokio::sync::mpsc` channel implementation. The channel in question wasn't even
 visible at the point where pausing happened. The non-local nature of these bugs
-forces us to take a position on pausing at the language/ecosystem level.
+forces us to take a position on pausing at the language/ecosystem level. (See
+also ["Could we statically identify futures that hold locks?"][statically])
 
 [incident]: https://github.com/oxidecomputer/omicron/issues/9259
 
@@ -807,8 +808,39 @@ for correctness.
 [zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
 
 ### Could we statically identify futures that hold locks?
+[statically]: #could-we-statically-identify-futures-that-hold-locks
 
-TODO: no
+Most futures don't currently hold locks across await points, and it might be
+nice to allow pausing the ones that don't, as long as we could reliably
+identify the ones that do.[^onerous] Unfortunately, "lock nature" isn't limited
+to a handful of primitive types. Any use of atomics might turn out to be a
+synchronous spinlock, and we can build an async lock out of any synchronous
+lock. A quick-and-dirty implementation looks like this ([playground
+link][my_lock]):
+
+[^onerous]: Note that the set of "regular functions that never take regular
+    locks" is small, because among other things `malloc` can take a lock. Most
+    of the async ecosystem is async-lock-free for now, but it might not stay
+    that way forever.
+
+[my_lock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3Ajoin_all%3B%0Ause+std%3A%3Acell%3A%3AUnsafeCell%3B%0Ause+std%3A%3Amarker%3A%3APhantomData%3B%0Ause+std%3A%3Aops%3A%3A%7BDeref%2C+DerefMut%7D%3B%0Ause+std%3A%3Async%3A%3Aatomic%3A%3A%7BAtomicBool%2C+Ordering%7D%3B%0Ause+std%3A%3Atask%3A%3A%7BPoll%2C+Waker%7D%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Astruct+Spinlock%3CT%3E+%7B%0A++++value%3A+UnsafeCell%3CT%3E%2C%0A++++locked%3A+AtomicBool%2C%0A%7D%0A%0Astruct+SpinlockGuard%3C%27a%2C+T%3E+%7B%0A++++lock%3A+%26%27a+Spinlock%3CT%3E%2C%0A++++_marker%3A+PhantomData%3CT%3E%2C+%2F%2F+Sync+if+T+is+Sync%0A%7D%0A%0Aimpl%3CT%3E+Spinlock%3CT%3E+%7B%0A++++const+fn+new%28value%3A+T%29+-%3E+Self+%7B%0A++++++++Self+%7B%0A++++++++++++value%3A+UnsafeCell%3A%3Anew%28value%29%2C%0A++++++++++++locked%3A+AtomicBool%3A%3Anew%28false%29%2C%0A++++++++%7D%0A++++%7D%0A%0A++++fn+lock%28%26self%29+-%3E+SpinlockGuard%3C%27_%2C+T%3E+%7B%0A++++++++while+self.locked.swap%28true%2C+Ordering%3A%3AAcquire%29+%7B%0A++++++++++++std%3A%3Ahint%3A%3Aspin_loop%28%29%3B%0A++++++++%7D%0A++++++++SpinlockGuard+%7B%0A++++++++++++lock%3A+self%2C%0A++++++++++++_marker%3A+PhantomData%2C%0A++++++++%7D%0A++++%7D%0A%7D%0A%0Aunsafe+impl%3CT%3E+Send+for+Spinlock%3CT%3E+where+T%3A+Send+%7B%7D%0Aunsafe+impl%3CT%3E+Sync+for+Spinlock%3CT%3E+where+T%3A+Send+%7B%7D%0A%0Aimpl%3CT%3E+Drop+for+SpinlockGuard%3C%27_%2C+T%3E+%7B%0A++++fn+drop%28%26mut+self%29+%7B%0A++++++++self.lock.locked.store%28false%2C+Ordering%3A%3ARelease%29%3B%0A++++%7D%0A%7D%0A%0Aimpl%3CT%3E+Deref+for+SpinlockGuard%3C%27_%2C+T%3E+%7B%0A++++type+Target+%3D+T%3B%0A%0A++++fn+deref%28%26self%29+-%3E+%26Self%3A%3ATarget+%7B%0A++++++++unsafe+%7B+%26*self.lock.value.get%28%29+%7D%0A++++%7D%0A%7D%0A%0Aimpl%3CT%3E+DerefMut+for+SpinlockGuard%3C%27_%2C+T%3E+%7B%0A++++fn+deref_mut%28%26mut+self%29+-%3E+%26mut+Self%3A%3ATarget+%7B%0A++++++++unsafe+%7B+%26mut+*self.lock.value.get%28%29+%7D%0A++++%7D%0A%7D%0A%0Astruct+AsyncLock%3CT%3E+%7B%0A++++value%3A+Spinlock%3CT%3E%2C%0A++++state%3A+Spinlock%3CAsyncLockState%3E%2C%0A%7D%0A%0Astruct+AsyncLockState+%7B%0A++++locked%3A+bool%2C%0A++++wakers%3A+Vec%3CWaker%3E%2C%0A%7D%0A%0Astruct+AsyncLockGuard%3C%27a%2C+T%3E+%7B%0A++++lock%3A+%26%27a+AsyncLock%3CT%3E%2C%0A++++value%3A+SpinlockGuard%3C%27a%2C+T%3E%2C%0A%7D%0A%0Aimpl%3CT%3E+AsyncLock%3CT%3E+%7B%0A++++const+fn+new%28value%3A+T%29+-%3E+Self+%7B%0A++++++++Self+%7B%0A++++++++++++value%3A+Spinlock%3A%3Anew%28value%29%2C%0A++++++++++++state%3A+Spinlock%3A%3Anew%28AsyncLockState+%7B%0A++++++++++++++++locked%3A+false%2C%0A++++++++++++++++wakers%3A+Vec%3A%3Anew%28%29%2C%0A++++++++++++%7D%29%2C%0A++++++++%7D%0A++++%7D%0A%0A++++async+fn+lock%28%26self%29+-%3E+AsyncLockGuard%3C%27_%2C+T%3E+%7B%0A++++++++std%3A%3Afuture%3A%3Apoll_fn%28%7Ccx%7C+%7B%0A++++++++++++let+mut+state+%3D+self.state.lock%28%29%3B%0A++++++++++++if+state.locked+%7B%0A++++++++++++++++state.wakers.push%28cx.waker%28%29.clone%28%29%29%3B%0A++++++++++++++++std%3A%3Atask%3A%3APoll%3A%3APending%0A++++++++++++%7D+else+%7B%0A++++++++++++++++state.locked+%3D+true%3B%0A++++++++++++++++Poll%3A%3AReady%28AsyncLockGuard+%7B%0A++++++++++++++++++++lock%3A+self%2C%0A++++++++++++++++++++value%3A+self.value.lock%28%29%2C%0A++++++++++++++++%7D%29%0A++++++++++++%7D%0A++++++++%7D%29%0A++++++++.await%0A++++%7D%0A%7D%0A%0Aimpl%3CT%3E+Drop+for+AsyncLockGuard%3C%27_%2C+T%3E+%7B%0A++++fn+drop%28%26mut+self%29+%7B%0A++++++++let+mut+state+%3D+self.lock.state.lock%28%29%3B%0A++++++++state.locked+%3D+false%3B%0A++++++++%2F%2F+XXX%3A+Wakers+can+run+arbitrary+code%2C+so+in+theory+this+could+deadlock.+Technically+the%0A++++++++%2F%2F+same+applies+to+.clone%28%29+above.%0A++++++++for+waker+in+state.wakers.drain%28..%29+%7B%0A++++++++++++waker.wake%28%29%3B%0A++++++++%7D%0A++++%7D%0A%7D%0A%0Aimpl%3CT%3E+Deref+for+AsyncLockGuard%3C%27_%2C+T%3E+%7B%0A++++type+Target+%3D+T%3B%0A%0A++++fn+deref%28%26self%29+-%3E+%26Self%3A%3ATarget+%7B%0A++++++++%26self.value%0A++++%7D%0A%7D%0A%0Aimpl%3CT%3E+DerefMut+for+AsyncLockGuard%3C%27_%2C+T%3E+%7B%0A++++fn+deref_mut%28%26mut+self%29+-%3E+%26mut+Self%3A%3ATarget+%7B%0A++++++++%26mut+self.value%0A++++%7D%0A%7D%0A%0Astatic+X%3A+AsyncLock%3Ci32%3E+%3D+AsyncLock%3A%3Anew%280%29%3B%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+Run+ten+concurrent+futures+that+all+increment+X.%0A++++let+mut+futures+%3D+Vec%3A%3Anew%28%29%3B%0A++++for+_+in+0..10+%7B%0A++++++++futures.push%28async+%7B%0A++++++++++++let+mut+guard+%3D+X.lock%28%29.await%3B%0A++++++++++++%2F%2F+Sleep+while+holding+the+lock%2C+to+test+the+Waker+handling+in+%60lock%60+and+%60drop%60+above.%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%28100%29%29.await%3B%0A++++++++++++*guard+%2B%3D+1%3B%0A++++++++%7D%29%3B%0A++++%7D%0A++++join_all%28futures%29.await%3B%0A++++println%21%28%22The+final+value+of+X+is+%7B%7D.%22%2C+*X.lock%28%29.await%29%3B%0A%7D>
+
+```rust
+struct AsyncLock<T> {
+    value: Spinlock<T>,
+    state: Spinlock<AsyncLockState>,
+}
+
+struct AsyncLockState {
+    locked: bool,
+    wakers: Vec<Waker>,
+}
+
+struct AsyncLockGuard<'a, T> {
+    lock: &'a AsyncLock<T>,
+    value: SpinlockGuard<'a, T>,
+}
+```
 
 ## Prior art
 [prior-art]: #prior-art
