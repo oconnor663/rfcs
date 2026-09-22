@@ -287,16 +287,15 @@ Unlike threads, which have a life of their own once they start running, a
 future only makes progress when something polls it. We could effectively pause
 the execution of a future by not polling it again. However, the
 "`Poll::Pending` rule" above generally forbids this. Whenever one of our child
-futures requests a wakeup,[^unknown] we must either poll it or drop it
-promptly. Dropping a future we don't want to poll anymore is called
+futures requests a wakeup, we must either poll it or drop it
+promptly.[^unknown] Dropping a future we don't want to poll anymore is called
 "cancellation".
 
-[^unknown]: It's possible to know which child (or children) triggered a given
-    wakeup by giving each child a unique `Waker`. [`FuturesUnordered`] does
-    this, for example. But most combinators forward their own `Waker` directly
-    to their children, so they don't know which child triggered a wakeup, and
-    they need to poll all their children every time. Futures tolerate extra
-    polling until they return `Ready`, so both approaches are valid.
+[^unknown]: Often we don't know which of our children triggered a given wakeup,
+    and we need to poll all of them every time we're polled. But it is possible
+    to know which child (or children) triggered a wakeup by giving each child a
+    unique `Waker`. [`FuturesUnordered`] does this, and most runtimes also do
+    this at the task level.
 
 This rule is essential for futures that acquire locks or other exclusive
 resources. When an async function takes a lock, the programmer needs to
@@ -332,7 +331,11 @@ guaranteed to ever finish.
 
 [^illegitimate]: _Illegitimate_ ways to interfere with the runtime include
     synchronous blocking in `poll`, calling unsafe functions like
-    [`pthread_cancel`], or just corrupting memory.
+    [`pthread_cancel`], or just corrupting memory. That said, the [userspace
+    executors section][userspace_executors] does include a corner case where
+    safe and reasonable-looking user code can pause a whole single-threaded
+    `Runtime`. That might be worth preventing somehow, or it might be
+    considered low-level enough that documenting it is sufficient.
 
 A fully formal definition of "promptly" will probably end up with somewhat
 unsatisfying wording like "a finite period of time". Consider this excerpt from
@@ -602,6 +605,7 @@ baz().await; // Deadlock!
 ```
 
 #### Userspace executors
+[userspace_executors]: #userspace-executors
 
 [`FuturesUnordered`] is both a concurrent `Stream` and an executor, and those
 two things turn out to have a lot in common. Much like we can [reproduce the
