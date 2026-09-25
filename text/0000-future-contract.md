@@ -61,12 +61,12 @@ what you're looking for.
 [dioxus_docs]: https://docs.rs/dioxus/0.7.10/dioxus/prelude/struct.UseFuture.html#method.pause
 [dioxus_src]: https://github.com/DioxusLabs/dioxus/blob/v0.7.10/packages/hooks/src/use_future.rs#L63-L72
 
-Here's a minimized example that's similar to Futurelock. `main` is trying to
-drive `bar` to completion, and while `bar` is running it also wants to call
-`baz` every so often. But `bar` and `baz` both call `foo` internally, which
-takes a lock. Imagine that `foo`, `bar`, `baz`, and `main` are all defined in
-different crates, and that the author of `main` has never heard of `foo`
-([playground link][select_deadlock]):
+Here's a minimized example similar to Futurelock. `main` is trying to drive
+`bar` to completion, and while `bar` is running it also wants to call `baz`
+every so often. But `bar` and `baz` both call `foo` internally, which takes a
+lock. Imagine that `foo`, `bar`, `baz`, and `main` are all defined in different
+crates, and that the author of `main` has never heard of `foo` ([playground
+link][select_deadlock]):
 
 [select_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++_+%3D+%26mut+bar_future+%3D%3E+break%2C%0A++++++++++++_+%3D+sleep%28Duration%3A%3Afrom_millis%285%29%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++++++baz%28%29.await%3B%0A++++++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D>
 
@@ -102,7 +102,7 @@ async fn main() {
 
 Unfortunately, `bar_future` is holding the lock that `baz` wants to acquire.
 Either polling it or dropping it would release the lock, but `main` doesn't do
-either of those things while waits on `baz`, so it deadlocks.
+either of those things while it waits on `baz`, so it deadlocks.
 
 Let's look closely at who gets polled when. If we [add some prints][squawk], we
 can see that `main` gets polled three times:
@@ -110,9 +110,9 @@ can see that `main` gets polled three times:
 [squawk]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+Instant%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+main_inner%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+mut+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++_+%3D+%26mut+bar_future+%3D%3E+break%2C%0A++++++++++++_+%3D+sleep%28Duration%3A%3Afrom_millis%285%29%29+%3D%3E+%7B%0A++++++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++++++baz%28%29.await%3B%0A++++++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++++++%7D%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%2F%2F+Squawk+a+timestamp+every+time+%60future%60+gets+polled.%0Afn+squawk%3CFut%3A+Future%3E%28future%3A+Fut%29+-%3E+impl+Future%3COutput+%3D+Fut%3A%3AOutput%3E+%7B%0A++++let+start+%3D+Instant%3A%3Anow%28%29%3B%0A++++let+mut+future+%3D+Box%3A%3Apin%28future%29%3B%0A++++std%3A%3Afuture%3A%3Apoll_fn%28move+%7Ccx%7C+%7B%0A++++++++let+elapsed+%3D+Instant%3A%3Aelapsed%28%26start%29.as_secs_f32%28%29+*+1000.0%3B%0A++++++++println%21%28%22%5B%7Belapsed%3A.3%7D+ms%5D+POLLED%21%22%29%3B%0A++++++++future.as_mut%28%29.poll%28cx%29%0A++++%7D%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++squawk%28main_inner%28%29%29.await%3B%0A%7D>
 
 - 0 ms: Control first enters `main`, `bar`, and the concurrent 5 ms `sleep`.
-- 5-6 ms:[^slack] The 5 ms `sleep` finishes and invokes its `Waker`, `main`
-  gets polled again, and control enters `baz`.
-- 10-11 ms: The `sleep` in `bar` completes and invokes its `Waker`,[^sleep]
+- 5-6 ms:[^slack] The `sleep` in `main` finishes and invokes its `Waker`,
+  `main` gets polled again, and control enters `baz`.
+- 10-11 ms: The `sleep` in `bar` finishes and invokes its `Waker`,[^sleep]
   `main` gets polled a third time, and it polls `baz` again.
 
 [^slack]: Tokio's timer implementation adds ~1 ms of slack to our 5 ms timeout
@@ -166,11 +166,11 @@ make that clear.
 At the same time, if `main` is broken, we'd strongly prefer to have a warning
 or error telling us that. (And there had better be a way to fix it too. See
 [the rationales section][fixing_main].) It's tempting to blame `select!`, since
-it's often found at the scene of these crimes. Could we deprecate `select!` to
-get our warning in main? That turns out to be both too broad and also
+it's often found at the scene of these crimes. Could we get our warning in
+`main` by deprecating `select!`? That turns out to be both too broad and also
 insufficient. We can produce similar deadlocks with any form of cancellation.
-Here's [one using `timeout`][timeout_deadlock]. Here's [another one using
-`try_join`][try_join_deadlock].
+Here's [a version using `timeout`][timeout_deadlock]. Here's [another version
+using `try_join`][try_join_deadlock].
 
 [timeout_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%285%29%2C+bar_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
@@ -194,22 +194,23 @@ However, this RFC doesn't propose deprecating that blanket impl today, for
 several reasons:
 
 - Rust doesn't currently support deprecating trait impls.
-- It's a broad impl that also covers `Pin<Box<dyn Future>>`, and we need that
-  to keep implementing `Future`.
-- Reworking existing code to avoid `Pin<&mut _>` often needs [helper functions
-  that don't currently exist][fixing_main].
+- It's a broad impl that also covers e.g. `Pin<Box<dyn Future>>`, which we
+  certainly don't want to deprecate.
+- When we rework existing code to avoid `Pin<&mut _>`, we often need [helper
+  functions that don't currently exist][fixing_main].
 
-All of those problems are solvable, but the last one in particular will take
-months or years, and it needs to happen in the crates ecosystem rather than in
-the standard library. Also, this ["cancellation by
+All of those problems are solvable, but designing and rolling out new helper
+functions months or years, and it needs to happen in the crates ecosystem
+rather than in the standard library. Also, this ["cancellation by
 reference"][cancellation_by_reference] pattern isn't the only way to violate
 the strict `Future` contract today. [`AsyncIterator`] and [`Stream`] have
 similar deadlock bugs, and we'll need at least one follow-up RFC to address
 those. See below for [a longer list of problems][broken_patterns].
 
-Instead of trying to fix everything all at once, this RFC proposes the smallest
-possible change: Document the strict `Future` contract. Once we agree about
-where the bugs are, we can start the long and gradual process of fixing them.
+Instead of trying to fix everything everywhere all at once, this RFC proposes
+the smallest possible change: Document the strict `Future` contract. Once we
+agree about where the bugs are, we can start the long and gradual process of
+fixing them.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -233,6 +234,29 @@ The `poll` method imposes two responsibilities on its caller:
 
 [`MaybeDone`]: https://docs.rs/futures/latest/futures/future/enum.MaybeDone.html
 [`Fuse`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse
+
+#### Cancellation
+
+Unlike threads, which have a life of their own once they start running, a
+future only makes progress when something polls it. We could effectively pause
+the execution of a future by not polling it again. However, the
+"`Poll::Pending` rule" above generally forbids this. Whenever one of our child
+futures requests a wakeup, we must either poll it or drop it
+promptly.[^unknown] Dropping a future we don't want to poll anymore is called
+"cancellation".
+
+[^unknown]: Often we don't know which of our children triggered a given wakeup,
+    and we need to poll all of them every time we're polled. But it is possible
+    to know which child (or children) triggered a wakeup by giving each child a
+    unique `Waker`. [`FuturesUnordered`] does this, and most runtimes also do
+    this at the task level.
+
+This rule is essential for futures that acquire locks or other exclusive
+resources. When an async function takes a lock, the programmer needs to
+consider that it might release the lock sooner than expected if it's cancelled,
+or a bit later due to timer slack or CPU load. But because of the
+`Poll::Pending` rule, the programmer doesn't need to worry about the caller
+pausing execution and accidentally holding the lock _forever_.
 
 #### Example
 
@@ -258,15 +282,23 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 }
 ```
 
-The problem is that `random()` might be true the first time, polling the inner
-`Fut` and letting it register wakeups, but then it might be false the second
-time when those wakeups trigger, failing to poll `Fut` promptly.[^first_time]
-This tends to cause hangs and deadlocks, not only for the future that didn't
-get polled, but also in distant and unrelated futures that happen to use the
-same shared resources ([playground link][coin_flip]). `CoinFlip` would be at
-fault for those bugs. There are three different ways we could fix it:
+The problem is that `random()` might be true the first time, polling `self.0`
+letting it register wakeups, but then it might be false the second time when
+those wakeups trigger, failing to poll `self.0` promptly.[^first_time] This
+tends to cause hangs and deadlocks, not only in the future that didn't get
+polled (which we might've intended), but also in distant and unrelated futures
+that happen to use the same shared resources. `CoinFlip` would be at fault for
+[those bugs][coin_flip].
 
-[coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Apub+struct+CoinFlip%3CFut%3E%28Pin%3CBox%3CFut%3E%3E%29%3B%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.0.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60self.0%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60coin_flip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60coin_flip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60coin_flip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++let+coin_flip+%3D+CoinFlip%28Box%3A%3Apin%28bar%28%29%29%29%3B%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+coin_flip+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
+If we don't want to poll `self.0` here, the `Future` contract requires us to
+cancel it. There are broadly three ways to do that:
+
+[^first_time]: On the other hand, if `random` is false the first time, we might
+    never poll `Fut`. Whether that's acceptable according to the `Future`
+    contract is an open question. See [the unresolved questions
+    section](#should-we-allow-an-indefinite-delay-between-creation-and-polling).
+
+[coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Apub+struct+CoinFlip%3CFut%3E%28Pin%3CBox%3CFut%3E%3E%29%3B%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.0.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60self.0%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60CoinFlip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60CoinFlip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60CoinFlip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+CoinFlip%28Box%3A%3Apin%28bar%28%29%29%29+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
 
 - Return `Ready` in the `else` branch, which requires the caller to drop
   `CoinFlip` promptly. We'd probably need to change the `Output` type to
@@ -274,39 +306,9 @@ fault for those bugs. There are three different ways we could fix it:
 - Drop `self.0` in the `else` branch before returning `Pending`. In this case
   `self.0` would need to be `Option<Fut>` or similar.
 - Panic in the `else` branch. This probably isn't what anyone wants, but it's
-  technically correct.[^futurama]
-
-[^first_time]: On the other hand, if `random` is false the first time, we might
-    never poll `Fut`. Whether that's acceptable according to the `Future`
-    contract is an open question. See [the unresolved questions
-    section](#should-we-allow-an-indefinite-delay-between-creation-and-polling).
-
-[^futurama]: [The best kind of correct.][futurama]
+  [technically correct][futurama].
 
 [futurama]: https://www.youtube.com/watch?v=aIzMuPMicGc&t=21s
-
-#### Cancellation
-
-Unlike threads, which have a life of their own once they start running, a
-future only makes progress when something polls it. We could effectively pause
-the execution of a future by not polling it again. However, the
-"`Poll::Pending` rule" above generally forbids this. Whenever one of our child
-futures requests a wakeup, we must either poll it or drop it
-promptly.[^unknown] Dropping a future we don't want to poll anymore is called
-"cancellation".
-
-[^unknown]: Often we don't know which of our children triggered a given wakeup,
-    and we need to poll all of them every time we're polled. But it is possible
-    to know which child (or children) triggered a wakeup by giving each child a
-    unique `Waker`. [`FuturesUnordered`] does this, and most runtimes also do
-    this at the task level.
-
-This rule is essential for futures that acquire locks or other exclusive
-resources. When an async function takes a lock, the programmer needs to
-consider that it might release the lock sooner than expected if it's cancelled,
-or a bit later due to timer slack or CPU load. But because of the
-`Poll::Pending` rule, the programmer doesn't need to worry about the caller
-pausing execution and accidentally holding the lock _forever_.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -377,11 +379,11 @@ drawback (fixing it will be a lot of churn), and  a catalog of future work
 #### Cancellation by reference
 [cancellation_by_reference]: #cancellation-by-reference
 
-The `select!`, `timeout`, and `try_join` deadlocks [above][motivation] are all
-examples what we might call "cancellation by reference". We can cause a
-deadlock anywhere cancellation occurs by having the cancelled future hold a
-lock and having its owner drive it by reference ([playground
-link][timeout_deadlock]):
+The `select!`, `timeout`, and `try_join` deadlocks [discussed
+above][motivation] are all examples what we might call "cancellation by
+reference". We can cause a deadlock anywhere cancellation occurs by having the
+cancelled future hold a lock and having its owner drive it by reference
+([playground link][timeout_deadlock]):
 
 ```rust
 let bar_future = pin!(bar());
@@ -595,10 +597,10 @@ baz().await; // Deadlock!
 
 ### A _lot_ of existing code snoozes futures
 
-The [list of broken patterns][broken_patterns] is long. Tons of existing async
-Rust code uses these patterns, and most of it will need changes to the caller
-as part of a fix.[^exception] Even if we only add warnings for most of these,
-that's a lot of proposed churn.
+The [list of broken patterns above][broken_patterns] is long. Tons of existing
+async Rust code uses these patterns, and most of it will need changes to the
+caller as part of a fix.[^exception] Even if we only add warnings for most of
+these, that's a lot of proposed churn.
 
 [^exception]: The one likely exception is the `for_each` example in the
     [Concurrent streams](#concurrent-streams) section below. See RFC TODO.
@@ -697,7 +699,7 @@ while timeout(Duration::from_millis(5), &mut bar_future).await.is_err() {
 
 We'd like to factor out the `baz` loop into its own `async` block and run it
 concurrently, but we can't [`join`] that block with `bar`, because it never
-returns. If we want to stick with existing, widely-used helpers, we can use
+returns. If we wanted to stick with existing, widely-used helpers, we could use
 `select!` ([playgroud link][select_baz_loop]):[^cancellation_token]
 
 [`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
@@ -731,9 +733,14 @@ never finish, so the resulting behavior is correct, but `select!` doesn't
 really capture our intent. It's also slightly awkward if we need the return
 value of `bar`.
 
-We could imagine a new helper function that fits this problem better. It would
-drive two futures concurrently, but only wait for the first one to finish.
-Let's call it `join_maybe`:
+We could imagine a new helper function that fits this problem better.[^roll] It
+would drive two futures concurrently, but only wait for the first one to
+finish. Let's call it `join_maybe`:
+
+[^roll]: This helper isn't available in any widely-used library crates today,
+    but [sometimes programmers roll their own][roll].
+
+[roll]: https://old.reddit.com/r/rust/comments/1risdcd/never_snooze_a_future/o89qor8/
 
 ```rust
 /// Run a "definitely" future and a "maybe" future concurrently. If the definitely future finishes
@@ -782,22 +789,22 @@ The focus of this RFC is the "`Poll::Pending` rule" about polling again
 promptly after a wakeup, but it also establishes a "`Poll::Ready` rule" about
 dropping a future promptly after it's finished. The benefit of this rule is
 that futures like [`Timeout`][`timeout`] and [`Race`] can contain their child
-futures directly (like they do today), without needing `Option`, [`MaybeDone`],
-or similar to represent the state where they drop a child without being dropped
-themselves. Instead, they cancel their children by returning `Ready` and
-trusting that their caller will drop them promptly. In other words, `Timeout`
-and `Race` can rely on the `Poll::Ready` rule to guarantee that they follow the
-`Poll::Pending` rule.
+futures directly (as they do today), without needing `Option`, [`MaybeDone`],
+or similar to represent the state where they've droped a child before being
+dropped themselves. Instead, they cancel their children indirectly by returning
+`Ready` and trusting that their caller will drop them promptly. In other words,
+`Timeout` and `Race` can rely on the `Poll::Ready` rule to guarantee that they
+follow the `Poll::Pending` rule.
 
 [`Race`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html
 
 Combinators like [`Join`] do need extra state to meet this requirement. When
 one side of a `Join` finishes, it needs to drop that future immediately,
-without waiting for both sides to finish. Luckily, most implementations of
-`Join` already do this today, using `MaybeDone` or similar, because it saves
-space. (`MaybeDone` holds either a future or its output, but not both at the
-same time.) Codifying the `Poll::Ready` rule isn't expected to require many
-code changes,[^code_changes] but it clarifies that callees can rely on the rule
+without waiting for the other side to finish. Most implementations of `Join`
+already do this today, using `MaybeDone` or similar, because it saves
+space.[^code_changes] (`MaybeDone` holds either a future or its output, but not
+both at the same time.) Codifying the `Poll::Ready` rule isn't expected to
+require many code changes, but it clarifies that callees can rely on the rule
 for correctness.
 
 [`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
@@ -805,14 +812,16 @@ for correctness.
 [^code_changes]: There are no known violations of the `Poll::Ready` rule in the
     current versions of `futures-rs`, Tokio, or `futures-lite`. The original
     implementation of the [`futures_lite::future::Zip`] combinator did break
-    the rule, but that was [reported as a deadlock bug][zip_deadlock] and fixed
-    in 2024.
+    this rule, but that was [reported as a deadlock bug][zip_deadlock] and
+    fixed in 2024.
 
 [`futures_lite::future::Zip`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.zip.html
 [zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
 
 ### Could we statically identify futures that hold locks?
 [statically]: #could-we-statically-identify-futures-that-hold-locks
+
+Not reliably, no.
 
 Most futures don't currently hold locks across await points, and it might be
 nice to allow pausing the ones that don't, as long as we could reliably
@@ -849,19 +858,19 @@ struct AsyncLockGuard<'a, T> {
 ## Prior art
 [prior-art]: #prior-art
 
-- ["Footgun lurking in `FuturesUnordered` and other concurrency-enabling streams"](https://github.com/rust-lang/futures-rs/issues/2387)
-- ["Barbara battles buffered streams"][barbara]
-- ["`for await` and the battle of buffered streams"](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
-- ["Future's liveness problem"](https://skepfyr.me/blog/futures-liveness-problem/)
-- ["Futurelock"]
-- ["Never snooze a future"][snooze]
+- [Footgun lurking in `FuturesUnordered` and other concurrency-enabling streams](https://github.com/rust-lang/futures-rs/issues/2387)
+- [Barbara battles buffered streams][barbara]
+- [`for await` and the battle of buffered streams](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
+- [Future's liveness problem](https://skepfyr.me/blog/futures-liveness-problem/)
+- [Futurelock]["Futurelock"]
+- [Never snooze a future][snooze]
 
 ## Unresolved questions
 [unresolved-questions]: #unresolved-questions
 
 ### Should we allow an indefinite delay between creation and polling?
 
-In other words, should the following be allowed, or should it e.g. fail Clippy?
+In other words, should the following be allowed, or should it warn somehow?
 
 ```rust
 let future1 = foo();
@@ -874,8 +883,8 @@ We could say that `future2` is snoozed here across the first await. On the
 other hand, `future2` has never been polled (or even pinned), and it's not
 likely to be holding any exclusive resources in its initial state. We could
 imagine giving `foo` e.g. a `MutexGuard` argument, but in that case the caller
-could see what's going on. To create a non-local problem, we'd need to write
-`foo` in a sync-then-async style, like this:
+could see what's going on. To create a truly non-local problem, we'd need to
+write `foo` in a sync-then-async style, like this:
 
 ```rust
 fn foo() -> impl Future<Output = ()> {
@@ -916,24 +925,22 @@ since the requirement is the same.
 ## Future work
 [future-work]: #future-work
 
-We will need to decide on fixes and them implement them for each of the [broken
-patterns][broken_patterns]. This RFC doesn't make those decisions, and many of
-the relevant APIs are in the crates ecosystem and not the standard library.
+We'll need to decide on a fix and implement it for [each of the broken patterns
+above][broken_patterns]. This RFC doesn't try to make those decisions, and many
+of the relevant APIs are in the crates ecosystem and not the standard library.
 However, there are two major issues that the standard library will need to
 address.
 
-### The `Pin<&mut _>` blanket impl
+### The `Pin<&mut _>` blanket impl for `Future`
 
 [That blanket impl][blanket] is at the heart of the
 [cancellation-by-reference][cancellation_by_reference] category of deadlocks.
 As the [Motivation][motivation] section mentioned, we can't deprecate that impl
-today, both because `Pin<Box<_>>` needs to keep implementing `Future`, and also
-(minor detail) because we currently don't have a way to deprecate impls in
-general. Maybe the impl can be split up using unstable specialization features
-internally, or maybe we could implement a more bespoke mechanism. But the hard
-problem here isn't how to implement the warning; it's rolling out new helper
-functions and macros that we could recommend to programmers who see the
-warning.
+today, in part because `Pin<Box<_>>` needs to keep implementing `Future`. Maybe
+the impl could be split up using unstable specialization features internally,
+or maybe we could implement a more bespoke mechanism. But the hard problem here
+isn't how to implement the warning; it's rolling out new helper functions and
+macros that we can recommend to programmers who see the warning.
 
 We need a wide variety of tools, both simple helper functions and fancier
 macros. We'll probably want `try_` versions that short-circuit with errors.
