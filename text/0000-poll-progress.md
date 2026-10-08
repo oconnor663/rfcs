@@ -13,7 +13,9 @@ while their body is pending. Also, in `async gen` blocks and functions
 control is paused at a `yield` in their body. Expand the documented
 `AsyncIterator` contract to require other consumers and adapters to behave the
 same way. To emphasize the new contract requirements of `poll_next`, define a
-`PollNext<_>` enum for it to return, replacing `Poll<Option<_>>`.
+`PollNext<_>` enum for it to return, replacing `Poll<Option<_>>`. With these
+changes, `AsyncIterator` satisfies the "strict" `Future` contract proposed in
+[RFC TODO][strict_future_rfc].
 
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
 [`RFC 2996`]: https://rust-lang.github.io/rfcs/2996-async-iterator.html
@@ -58,7 +60,7 @@ it's done (currently `Ready(None)`). Once control moves into `do_work`, though,
 the loop stops driving `my_iter` entirely. That applies necessary
 "backpressure" to async iterators, and it's mostly by design. But it can be a
 problem if `my_iter` wraps multiple concurrent futures or other iterators
-internally, because suspending them at arbitrary await points isn't generally
+internally, because pausing them at arbitrary await points isn't generally
 correct. Here's an example where this causes a deadlock that looks like it
 should be impossible in a straight-line reading of the code:
 
@@ -96,34 +98,16 @@ concurrent combinators have the same problem.
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, futures and async iterators need to continuously drive any other
-futures or async iterators they contain. [The `Future` contract][poll] requires
-us to poll a future promptly when it requests a wakeup.[^future_contract] At a
-high level, that guarantees steady control flow through `async` blocks and
-functions until they return or get cancelled. [The `AsyncIterator`
-contract][poll_next] should require the same, that we poll an async iterator
-promptly when it requests a wakeup. At a high level, that would guarantee
-steady control flow through `async gen` blocks and functions until they return,
-get cancelled, or _yield an item_. Backpressure is important for async
-iterators, but we should apply it at yield points, not at await
-points.[^yield_points]
-
-[poll]: https://doc.rust-lang.org/std/future/trait.Future.html#tymethod.poll
-
-[^future_contract]: Or does it? The docs are unfortunately ambiguous on this
-    point. On the one hand they say that "once a task has been woken up, it
-    should attempt to `poll` the future again". On the other hand they say that
-    "each time the current task is woken up, it should actively re-`poll`
-    pending futures that it _still has an interest in_". What it means to "lose
-    interest" in a future isn't clear. Despite the [importance and
-    controversy][cancelling] of cancellation in async Rust, the words "cancel"
-    and "drop" do not appear in the `Future` docs. Maybe we can reach consensus
-    that ["snoozing"][snooze] futures isn't allowed, but either way, we do need
-    to decide what the contract is and document it. See also the [rationales
-    section](#is-pausing-control-at-await-points-so-terrible-could-we-instead-agree-to-allow-it)
-    and the [future possibilities section](#clarifying-the-future-contract), no
-    pun intended.
-
-[cancelling]: https://www.youtube.com/watch?v=zrv5Cy1R7r4
+futures or async iterators they contain. The "strict" `Future` contract ([RFC
+TODO][strict_future_rfc]) requires us to poll or drop a future promptly when it
+requests a wakeup. At a high level, that guarantees steady control flow through
+`async` blocks and functions until they return or get cancelled. [The
+`AsyncIterator` contract][poll_next] should require the same, that we poll or
+drop an async iterator promptly when it requests a wakeup. At a high level,
+that would guarantee steady control flow through `async gen` blocks and
+functions until they return, get cancelled, or _yield an item_. Backpressure is
+important for async iterators, but we should apply it at yield points, not at
+await points.[^yield_points]
 
 [poll_next]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#tymethod.poll_next
 
@@ -200,10 +184,11 @@ the sequence of events ([playground link][poll_progress_playground]):
     section](#implementing-asynciterator) and also the [discussion in the
     rationales](#why-not-allow-poll_progress-at-any-time).
 
-That's a lot of low-level detail, but at a high level `poll_progress` repairs
-the steady control flow guarantee for async functions. That makes reasoning
-about async locking "merely" as difficult as regular locking plus cancellation,
-instead of even more difficult than that.
+That's a lot of low-level detail, but at a high level `poll_progress` satisfies
+the "strict" `Future` contract ([RFC TODO][strict_future_rfc]) and repairs the
+steady control flow guarantee for async code inside an iterator. This makes
+reasoning about async locking "merely" as difficult as regular locking plus
+cancellation, instead of even more difficult than that.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -719,8 +704,7 @@ The need for `poll_progress` came from the following assumptions:
 
 1. We want async iterators like `Merge` and `FuturesUnordered` to wrap multiple
    concurrent iterators or futures and yield their results as they come.
-2. We can't tolerate suspending async iterators or futures at random await
-   points.
+2. We can't tolerate pausing async iterators or futures at random await points.
 
 `LendingAsyncIterator` can't do much about the second assumption, but it might
 be able to attack the first, either by not wrapping multiple futures, or by
@@ -1078,6 +1062,10 @@ better than confusing control flow bugs. We can't do this for the
 `PollNext::Item` rule, and callers who overlook that one will miss wakeups, but
 for the `PollNext::Pending` rule we can do it.
 
+### TODO: `try_fold`?
+
+"The purpose of an iterator is to iterate."
+
 ## Prior art
 [prior-art]: #prior-art
 
@@ -1196,6 +1184,9 @@ that can't uphold that rule? Does that include the blanket `Future` impls on
 can't be removed at this point, but we could warn or lint on code that uses
 them.
 
+> TODO: Delete this section and move the description of this warning to the
+> other RFC.
+
 We could also warn whenever an idle `Future`/`AsyncIterator` crosses a
 suspension point.[^alternatively] That might not cover e.g. `Vec<Box<dyn
 Future>>`, but most `Future` containers are themselves futures or async
@@ -1204,10 +1195,6 @@ an `async fn`, the body of an `async gen fn` isn't required to begin executing
 promptly (e.g. if it winds up on the right side of a [`Chain`]), so any
 `Future`/`AsyncIterator` argument to an `async gen fn` is inherently idle
 across a suspension point and would trigger this warning.
-
-> TODO: This warning would trigger on the hypothetical `async gen fn merge`
-> example below. That seems not ideal. Should we weaken the requirement that
-> futures start executing immediately?
 
 [future_blanket_mut]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
 [future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
@@ -1246,6 +1233,8 @@ macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
 Speaking of which...
 
 ### Concurrency syntax
+
+> TODO: Move this section to the other RFC.
 
 In this RFC we can only introduce concurrency into async iteration with helpers
 like `Merge` or `Buffer1`, which are written "by hand" using the
@@ -1344,6 +1333,9 @@ where
 }
 ```
 
+> TODO: On the other hand, would this warn about an `AsyncIterator` living
+> across a suspension point?
+
 ### Generalized coroutines
 
 We could imagine a more general "coroutine" version of `Iterator` and
@@ -1409,3 +1401,4 @@ need a way to come up with input values, which might be possible in some cases
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 [snooze]: https://jacko.io/snooze.html
+[strict_future_rfc]: ./0000-future-contract.md
