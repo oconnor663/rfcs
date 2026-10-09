@@ -6,25 +6,26 @@
 ## Summary
 [summary]: #summary
 
-Add a required `poll_progress` method to the [`AsyncIterator`] trait ([`RFC
-2996`]), and make `for await` loops ([#118898][for_await]) call `poll_progress`
-while their body is pending. Also, in `async gen` blocks and functions
-([#117078][gen_blocks]), make `for await` loops call `poll_progress` while
-control is paused at a `yield` in their body. Expand the documented
-`AsyncIterator` contract to require other consumers and adapters to behave the
-same way. To emphasize the new contract requirements of `poll_next`, define a
-`PollNext<_>` enum for it to return, replacing `Poll<Option<_>>`. With these
-changes, `AsyncIterator` satisfies the "strict" `Future` contract proposed in
-[RFC TODO][strict_future_rfc].
+The current [`AsyncIterator`] trait ([RFC 2996]) is incompatible with the
+"strict" [`Future`] contract ([RFC TODO][strict_future_rfc]), which requires us
+to poll futures promptly when they request a wakeup. The only way to poll an
+`AsyncIterator` today is `poll_next`, but we do not and generally cannot call
+that method while control is suspended in e.g. the body of a `for await` loop
+([#118898][for_await]).
+
+To fix this, add a required `poll_progress` method to the `AsyncIterator`
+trait. Call it automatically whenever the body of a `for await` loop is
+pending. In `async gen` blocks and functions ([#117078][gen_blocks]), forward
+`poll_progress` while control is suspended at a `yield` in a `for await` body.
+Document a "strict" `AsyncIterator` contract requiring other consumers and
+adapters to behave analogously. To emphasize the new contract requirements,
+define a `PollNext<_>` enum for `poll_next` to return, replacing
+`Poll<Option<_>>`.
 
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
-[`RFC 2996`]: https://rust-lang.github.io/rfcs/2996-async-iterator.html
+[RFC 2996]: https://rust-lang.github.io/rfcs/2996-async-iterator.html
 [for_await]: https://github.com/rust-lang/rust/issues/118898
 [gen_blocks]: https://github.com/rust-lang/rust/issues/117078
-
-To avoid burying the lede: Effectively deprecating [`StreamExt::next`] will
-probably be the most controversial part of this RFC. See ["What about
-`.next()`?"](#what-about-next) in the Drawbacks section.
 
 ## Motivation
 [motivation]: #motivation
@@ -54,15 +55,23 @@ for await _ in my_iter {
 }
 ```
 
-When control is at the top, the `for await` loop calls `my_iter.poll_next`
-until it either yields an item (currently `Ready(Some(_))`) or indicates that
-it's done (currently `Ready(None)`). Once control moves into `do_work`, though,
-the loop stops driving `my_iter` entirely. That applies necessary
+When control is at the top, the `for await` loop calls `poll_next` on
+`my_iter`[^into] until it either yields an item (currently `Ready(Some(_))`) or
+indicates that it's done (currently `Ready(None)`). Then, when control moves
+into `do_work`, the loop stops driving `my_iter`. That applies necessary
 "backpressure" to async iterators, and it's mostly by design. But it can be a
 problem if `my_iter` wraps multiple concurrent futures or other iterators
 internally, because pausing them at arbitrary await points isn't generally
 correct. Here's an example where this causes a deadlock that looks like it
 should be impossible in a straight-line reading of the code:
+
+[^into]: For completeness, the `for await` loop calls
+    [`IntoAsyncIterator::into_async_iter`][into_async_iter] first, the same way
+    a regular `for` loop calls [`IntoIterator::into_iter`][into_iter], but
+    there are no nontrivial implementations of `IntoAsyncIterator` today.
+
+[into_async_iter]: https://doc.rust-lang.org/std/async_iter/trait.IntoAsyncIterator.html
+[into_iter]: https://doc.rust-lang.org/std/iter/trait.IntoIterator.html
 
 ```rs
 // `do_work` takes a private lock, sleeps briefly, and releases it. A deadlock here shouldn't be possible.
@@ -98,16 +107,16 @@ concurrent combinators have the same problem.
 
 To avoid these sorts of deadlocks, and other hard-to-diagnose hangs and
 latencies, futures and async iterators need to continuously drive any other
-futures or async iterators they contain. The "strict" `Future` contract ([RFC
-TODO][strict_future_rfc]) requires us to poll or drop a future promptly when it
-requests a wakeup. At a high level, that guarantees steady control flow through
-`async` blocks and functions until they return or get cancelled. [The
-`AsyncIterator` contract][poll_next] should require the same, that we poll or
-drop an async iterator promptly when it requests a wakeup. At a high level,
-that would guarantee steady control flow through `async gen` blocks and
-functions until they return, get cancelled, or _yield an item_. Backpressure is
-important for async iterators, but we should apply it at yield points, not at
-await points.[^yield_points]
+futures or async iterators they contain. That's why the "strict" `Future`
+contract ([RFC TODO][strict_future_rfc]) requires us to poll or drop a future
+promptly when it requests a wakeup. At a high level, that guarantees steady
+control flow through `async` blocks and functions until they return or get
+cancelled. [The `AsyncIterator` contract][poll_next] needs to require the same,
+that we poll or drop an async iterator promptly when it requests a wakeup. At a
+high level, that would guarantee steady control flow through `async gen` blocks
+and functions until they return, get cancelled, or _yield an item_.
+Backpressure is important for async iterators, but we should apply it only at
+yield points, not at await points.[^yield_points]
 
 [poll_next]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html#tymethod.poll_next
 
@@ -117,20 +126,18 @@ await points.[^yield_points]
     context of `AsyncIterator` and `async gen fn`, we'll use "yield point" to
     refer specifically to returning an item from `poll_next`, which is what the
     `yield` keyword does. An "await point" is anywhere `poll` or `poll_next`
-    might report pending, including `.await` expressions and `for await` items.
-    The general term that covers both yield points and await points is
+    could return `Pending`, including `.await` expressions and `for await`
+    items. The general term that covers both yield points and await points is
     "suspension points".
 
 [rfc2394]: https://rust-lang.github.io/rfcs/2394-async_await.html
 
 In the example above, the loop has driven `Merge` to a yield point, and `Merge`
 has driven its first [`Once`] child to a yield point, but its second `Once`
-child is suspended at an await point. (Not literally an `.await` expression,
-because `Once` isn't an `async gen fn`, but `poll_next` has returned
-`Pending`.) As a consequence, the `do_work` future it owns is also suspended at
-an `.await`, which is the heart of our deadlock. We need `Merge` to re-poll its
-children when that wakeup fires.[^bad_merge] That means we also need `for
-await` to re-poll `Merge`. How?
+child is suspended at an await point. The `do_work` future that the second
+`Once` owns is also suspended at an await point, and it has arranged a wakeup
+for itself. We need `Merge` to re-poll its children when that wakeup
+fires.[^bad_merge] That means we also need `for await` to re-poll `Merge`. How?
 
 [`Once`]: https://docs.rs/futures/latest/futures/stream/fn.once.html
 
@@ -185,10 +192,10 @@ the sequence of events ([playground link][poll_progress_playground]):
     rationales](#why-not-allow-poll_progress-at-any-time).
 
 That's a lot of low-level detail, but at a high level `poll_progress` satisfies
-the "strict" `Future` contract ([RFC TODO][strict_future_rfc]) and repairs the
-steady control flow guarantee for async code inside an iterator. This makes
-reasoning about async locking "merely" as difficult as regular locking plus
-cancellation, instead of even more difficult than that.
+the "strict" `Future` contract and repairs the steady control flow guarantee
+for async code running in an `AsyncIterator`. In this context, reasoning about async locking
+is "only" as difficult as regular locking plus cancellation,
+instead of even more difficult than that.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -212,8 +219,7 @@ wait for input in a way that's compatible with async code.
 [`std::io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
 [`std::sync::mpsc::Iter`]: https://doc.rust-lang.org/std/sync/mpsc/struct.Iter.html
 
-Async iterators also have a superpower that regular iterators generally do not.
-They can keep working "in the background" while the caller is processing an
+Async iterators can also do concurrent work while the caller is processing an
 item. For example:
 
 ```rs
@@ -226,9 +232,8 @@ Depending on how it's implemented, `fetch_images` could start downloading the
 next `jpeg` concurrently while control is inside `save_image`. A regular
 iterator might do that with threads, but threads complicate borrowing and
 short-circuiting and usually require heap allocation. Async iterators can do
-concurrent background work without threads or allocations, and with full
-support for local borrowing and straightforward behavior for `break` and
-`return` (cancelling the background work).
+concurrent work without threads or allocations, and with full support for local
+borrowing and straightforward behavior for `break` and `return` (cancellation).
 
 ### Implementing `AsyncIterator`
 
@@ -1392,6 +1397,7 @@ between the coroutine and the body -- a wrapper type like `Buffer1` above would
 need a way to come up with input values, which might be possible in some cases
 -- but macros might be able to do interesting things.
 
+[`Future`]: https://doc.rust-lang.org/std/future/trait.Future.html
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 [futurelock]: https://rfd.shared.oxide.computer/rfd/0609
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
