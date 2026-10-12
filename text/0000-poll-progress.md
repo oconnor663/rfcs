@@ -15,11 +15,11 @@ that method while control is suspended in e.g. the body of a `for await` loop
 
 To fix this, add a required `poll_progress` method to the `AsyncIterator`
 trait. Call it automatically whenever the body of a `for await` loop is
-pending. In `async gen` blocks and functions ([#117078][gen_blocks]), forward
-`poll_progress` while control is suspended at a `yield` in a `for await` body.
-Document a "strict" `AsyncIterator` contract requiring other consumers and
-adapters to behave analogously. To emphasize the new contract requirements,
-define a `PollNext<_>` enum for `poll_next` to return, replacing
+pending. In `async gen` blocks and functions ([#117078][gen_blocks]), also
+forward `poll_progress` while control is suspended at a `yield` in a `for
+await` body. Document a "strict" `AsyncIterator` contract requiring other
+consumers and adapters to behave analogously. To emphasize the new contract
+requirements, define a `PollNext<_>` enum for `poll_next` to return, replacing
 `Poll<Option<_>>`.
 
 [`AsyncIterator`]: https://doc.rust-lang.org/std/async_iter/trait.AsyncIterator.html
@@ -193,8 +193,8 @@ the sequence of events ([playground link][poll_progress_playground]):
 
 That's a lot of low-level detail, but at a high level `poll_progress` satisfies
 the "strict" `Future` contract and repairs the steady control flow guarantee
-for async code running inside an `AsyncIterator`. This makes reasoning about
-async locking in these cases "only" as difficult as regular locking plus
+for code running inside an `AsyncIterator`. This makes reasoning about async
+locking in these cases "only" as difficult as regular locking plus
 cancellation, instead of even more difficult than that.
 
 ## Guide-level explanation
@@ -309,8 +309,8 @@ Expanding on the first two requirements (underlined) in the table above:
   minds is to cancel the whole iterator by dropping it.) This rule is aimed at
   concurrent combinators that "merge" multiple async iterators together. After
   a child iterator yields an item, those combinators should keep driving their
-  other children with `poll_next` internally until each of them has yielded an
-  item. This gives us consistent control flow through chains of adapters and
+  other children with `poll_next` internally until each of them yields an item.
+  That gives us consistent control flow through chains of adapters and
   combinators, and it means that most async iterators don't need to allocate
   buffer space for an item. The rationale section [discusses this rule
   further](#why-not-allow-poll_progress-at-any-time).
@@ -345,7 +345,7 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
             match this.inner.as_mut().poll_next(cx) { // We don't have a buffered `item`. Try to get one.
                 PollNext::Item(item) => {
                     *this.item = Some(item);
-                    this.inner.poll_progress(cx) // `poll_progress` is necessary.
+                    this.inner.poll_progress(cx) // `poll_progress` is required.
                 }
                 PollNext::Pending => Poll::Pending, // `poll_progress` is forbidden.
                 PollNext::Done => Poll::Ready(()), // `inner` is fused.
@@ -363,10 +363,23 @@ the "`PollNext::Item` rule" about polling again promptly, but note that the
 same rule applies _to the caller_. The caller must poll again, and when they
 do, `inner` will get polled again. However, `Buffer1::poll_progress` doesn't
 impose the same requirements on its caller, so it does need to call
-`inner.poll_progress` in its `Item` branch. (It would also need to handle
-`Done`, but [`Fuse`] takes care of that.)
+`inner.poll_progress` in its `Item` branch. (It also needs to drop `inner` in
+the `Done` branch, but `Fuse` takes care of that.[^fuse])
 
-[`Fuse`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.fuse
+[^fuse]: In fact, although [`futures::future::Fuse`][future_fuse] drops its
+    inner future after `Ready` -- and [`std::iter::Fuse`][iter_fuse] drops its
+    inner iterator after `None` -- [`futures::stream::Fuse`][stream_fuse]
+    actually does _not_ drop its inner stream after `Ready(None)` today. It
+    used to in the distant past, but that behavior [was removed when `Sink`
+    support was added][sink_pr]. If this RFC is accepted, arguably even if only
+    [RFC TODO][strict_future_rfc] is accepted, an `AsyncIterator` version of
+    `Fuse` must drop its inner stream.
+
+[future_fuse]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
+[stream_fuse]: https://docs.rs/futures/latest/futures/stream/struct.Fuse.html
+[iter_fuse]: https://doc.rust-lang.org/std/iter/struct.Fuse.html
+[`Sink`]: https://docs.rs/futures/latest/futures/prelude/trait.Sink.html
+[sink_pr]: https://github.com/rust-lang/futures-rs/pull/226
 
 Note also that `Buffer1::poll_progress` follows the "`PollNext::Pending` rule"
 and doesn't call `inner.poll_progress` after `inner.poll_next` returns
