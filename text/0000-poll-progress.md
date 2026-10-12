@@ -193,9 +193,9 @@ the sequence of events ([playground link][poll_progress_playground]):
 
 That's a lot of low-level detail, but at a high level `poll_progress` satisfies
 the "strict" `Future` contract and repairs the steady control flow guarantee
-for async code running in an `AsyncIterator`. In this context, reasoning about async locking
-is "only" as difficult as regular locking plus cancellation,
-instead of even more difficult than that.
+for async code running inside an `AsyncIterator`. This makes reasoning about
+async locking in these cases "only" as difficult as regular locking plus
+cancellation, instead of even more difficult than that.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
@@ -213,8 +213,8 @@ Async code can and often does use regular iterators and `for` loops too, as
 long as their next item is always immediately available, like loops over a
 range or a collection. But async functions shouldn't use iterators like
 [`std::io::Lines`] or [`std::sync::mpsc::Iter`] that sometimes block waiting
-for input. The main purpose of `AsyncIterator` is to support iterators that
-wait for input in a way that's compatible with async code.
+for input. The main purpose of `AsyncIterator` is to support iteration that
+waits for input in a way that's compatible with async code.
 
 [`std::io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
 [`std::sync::mpsc::Iter`]: https://doc.rust-lang.org/std/sync/mpsc/struct.Iter.html
@@ -228,12 +228,12 @@ for await jpeg in fetch_images() {
 }
 ```
 
-Depending on how it's implemented, `fetch_images` could start downloading the
-next `jpeg` concurrently while control is inside `save_image`. A regular
-iterator might do that with threads, but threads complicate borrowing and
-short-circuiting and usually require heap allocation. Async iterators can do
-concurrent work without threads or allocations, and with full support for local
-borrowing and straightforward behavior for `break` and `return` (cancellation).
+Depending on how it's implemented, `fetch_images` could download the next
+`jpeg` concurrently while `save_image` is running. A regular iterator might do
+that with threads, but that complicates borrowing and short-circuiting and
+usually requires heap allocation. Async iterators can do concurrent work
+without threads or allocations, and with full support for local borrowing and
+straightforward behavior for `break` and `return` (cancellation).
 
 ### Implementing `AsyncIterator`
 
@@ -280,18 +280,20 @@ to contend with, `AsyncIterator` has _five_:
 | --- | --- |
 | `poll_next` returned `PollNext::Item` | You must <ins><strong>poll again promptly,</strong></ins> either `poll_next` if you want another item or `poll_progress` if not. |
 | `poll_next` returned `PollNext::Pending` | You must `poll_next` again after wakeup. <ins><strong>`poll_progress` is not allowed,</strong></ins> and it might panic or otherwise misbehave (within the bounds of safe code). |
-| `poll_next` returned `PollNext::Done` | You must not poll again. Either `poll_next` or `poll_progress` might panic or misbehave. |
-| `poll_progress` returned `Poll::Pending` | You can `poll_next` when you want another item, otherwise you must `poll_progress` again after wakeup. |
-| `poll_progress` returned `Poll::Ready` | No requirements. You can `poll_next` when you want another item, or you can stop polling. `poll_progress` is allowed but usually has no effect. |
+| `poll_next` returned `PollNext::Done` | You must drop the iterator promptly.[^inherited] Either `poll_next` or `poll_progress` might panic or misbehave. |
+| `poll_progress` returned `Poll::Pending` | You can `poll_next` whenever you want another item, otherwise you must `poll_progress` again after wakeup. |
+| `poll_progress` returned `Poll::Ready` | No requirements. You can `poll_next` whenever you want another item, or you can stop polling. `poll_progress` is still allowed but usually has no effect. |
 
-An `AsyncIterator` begins life in the first state above, expecting a prompt
-call to either `poll_next` or `poll_progress`. Although a `for await` loop will
-always start by calling `poll_next`, other consumers (e.g. [`Chain`], on its
-right side) may start with `poll_progress`. Also, cancelling an async iterator
-by dropping it is allowed at any time.
+[^inherited]: This drop requirement is inherited from [RFC
+    TODO][strict_future_rfc], which imposes a similar requirement on `Future`.
 
-The first two requirements in the table above are underlined, because they're
-the most surprising. Expanding on those:
+When an `AsyncIterator` is first created, either `poll_next` or `poll_progress`
+is valid. Although a `for await` loop will always start by calling `poll_next`,
+other consumers (e.g. [`Chain`], on its right side) may start with
+`poll_progress`. Also, cancelling an iterator by dropping it is allowed at any
+time.
+
+Expanding on the first two requirements (underlined) in the table above:
 
 - **The `PollNext::Item` rule:** When `poll_next` returns an item, it's not
   required to register any wakeups. That's important for performance, because
@@ -1067,7 +1069,17 @@ better than confusing control flow bugs. We can't do this for the
 `PollNext::Item` rule, and callers who overlook that one will miss wakeups, but
 for the `PollNext::Pending` rule we can do it.
 
+### What's the point of the drop requirement after `PollNext::Done`?
+
+That requirement is inherited from `Future`. See [RFC TODO][strict_future_rfc].
+It means a `Future` implementation can reliably cancel its children by
+returning `Ready`, without adding any extra state (e.g. `Option`, `MaybeDone`)
+to support dropping them separately. Similarly, an `AsyncIterator` can reliably
+cancel its children by returning `Done`.
+
 ### TODO: `try_fold`?
+
+### TODO: Should we allow an indefinite delay between creation and polling?
 
 "The purpose of an iterator is to iterate."
 

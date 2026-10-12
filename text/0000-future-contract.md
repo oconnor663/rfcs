@@ -805,9 +805,9 @@ one side of a `Join` finishes, it needs to drop that future immediately,
 without waiting for the other side to finish. Most implementations of `Join`
 already do this today, using `MaybeDone` or similar, because it saves
 space.[^code_changes] (`MaybeDone` holds either a future or its output, but not
-both at the same time.) Codifying the `Poll::Ready` rule isn't expected to
-require many code changes, but it clarifies that callees can rely on the rule
-for correctness.
+both at the same time.) For this reason, codifying the `Poll::Ready` rule isn't
+expected to cause any substantial code changes in the ecosystem; it's mainly to
+clarify that callees can rely on this behavior for correctness.
 
 [`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 
