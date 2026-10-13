@@ -804,21 +804,69 @@ Combinators like [`Join`] do need extra state to meet this requirement. When
 one side of a `Join` finishes, it needs to drop that future immediately,
 without waiting for the other side to finish. Most implementations of `Join`
 already do this today, using `MaybeDone` or similar, because it saves
-space.[^code_changes] (`MaybeDone` holds either a future or its output, but not
-both at the same time.) For this reason, codifying the `Poll::Ready` rule isn't
-expected to cause any substantial code changes in the ecosystem; it's mainly to
-clarify that callees can rely on this behavior for correctness.
+space.[^original_zip] (`MaybeDone` holds either a future or its output, but not
+both at the same time.)
 
 [`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 
-[^code_changes]: There are no known violations of the `Poll::Ready` rule in the
-    current versions of `futures-rs`, Tokio, or `futures-lite`. The original
-    implementation of the [`futures_lite::future::Zip`] combinator did break
-    this rule, but that was [reported as a deadlock bug][zip_deadlock] and
-    fixed in 2024.
+[^original_zip]: The original implementation of the
+    [`futures_lite::future::Zip`] combinator did break this rule, but that was
+    [reported as a deadlock bug][zip_deadlock] and fixed in 2024.
 
 [`futures_lite::future::Zip`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.zip.html
 [zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
+
+Although most of the ecosystem already follows the `Poll::Ready` rule, there
+are some cases that will need to be fixed. Many of these will be
+backwards-compatible, but one likely exception is
+[`futures::stream::Fuse`][stream_fuse]. Unlike its [close Tokio
+cousin][tokio_stream_fuse] -- and also unlike
+[`futures::future::Fuse`][future_fuse] and
+[`std::iter::Fuse`][iter_fuse][^specialization] -- `futures::stream::Fuse` does
+_not_ currently drop its inner stream after it's done.[^sink] That means that
+combinators that use `Fuse` to manage their children (e.g. [`Zip`]), can break
+the `Poll::Ready` rule with child streams that own futures (e.g. [`Once`],
+[`TakeWhile`]). We should fix `Fuse`, making these combinators correct as
+written, but unfortunately that will break several of its public methods, which
+currently assume the inner stream is always present.
+
+[^specialization]: As an exception, `std::iter::Fuse` has [specialized
+    implementation] for `FusedIterator` types, which doesn't drop anything.
+
+[specialization]: https://github.com/rust-lang/rust/blob/1.99.0/library/core/src/iter/adapters/fuse.rs#L394-L404
+
+[^sink]: It used to in the distant past, but that behavior [was removed when
+    `Sink` support was added][sink_pr].
+
+[`Sink`]: https://docs.rs/futures/latest/futures/prelude/trait.Sink.html
+[sink_pr]: https://github.com/rust-lang/futures-rs/pull/226
+
+[future_fuse]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
+[stream_fuse]: https://docs.rs/futures/latest/futures/stream/struct.Fuse.html
+[tokio_stream_fuse]: https://docs.rs/tokio-stream/latest/tokio_stream/adapters/struct.Fuse.html
+[iter_fuse]: https://doc.rust-lang.org/std/iter/struct.Fuse.html
+[`Once`]: https://docs.rs/futures/latest/futures/stream/fn.once.html
+[`TakeWhile`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.take_while
+[`Zip`]: https://docs.rs/futures/latest/futures/stream/struct.Zip.html
+
+Some other cases that will need to be fixed (probably using a dropping version
+of `Fuse`):
+
+- [`futures::stream::IntoAsyncRead`] and [`tokio_util::io::StreamReader`] both
+  adapt a stream of `[u8]` slices into their respective IO reader traits, and
+  both of them can retain the underlying stream after it's done. This should be
+  backwards compatible for `IntoAsyncRead`, but `StreamReader` has public
+  accessor methods that don't currently return `Option`.
+
+[`futures::stream::IntoAsyncRead`]: https://docs.rs/futures/latest/futures/stream/struct.IntoAsyncRead.html
+[`tokio_util::io::StreamReader`]: https://docs.rs/tokio-util/latest/tokio_util/io/struct.StreamReader.html
+
+- The [`futures-concurrency`] implementations of [`RaceOk`] ("return the first
+  `Ok` ouput, unless all outputs are `Err`") for arrays and tuples don't drop
+  futures that return `Err`. This should be backwards compatible.
+
+[`futures-concurrency`]: https://github.com/yoshuawuyts/futures-concurrency
+[`RaceOk`]: https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.RaceOk.html
 
 ### Could we statically identify futures that hold locks?
 [statically]: #could-we-statically-identify-futures-that-hold-locks

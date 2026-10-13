@@ -362,18 +362,13 @@ directly, without doing any further polling. That might seem like it violates
 the "`PollNext::Item` rule" about polling again promptly, but note that the
 same rule applies _to the caller_. The caller must poll again, and when they
 do, `inner` will get polled again. However, `Buffer1::poll_progress` doesn't
-impose the same requirements on its caller, so it does need to call
-`inner.poll_progress` in its `Item` branch. (It also needs to drop `inner` in
-the `Done` branch, but `Fuse` takes care of that.[^fuse])
+impose the same requirements on its caller, so its `Item` branch needs to call
+`inner.poll_progress` explicitly. (It also needs to drop `inner` in its `Done`
+branch, but `Fuse` will take care of that.[^fuse])
 
-[^fuse]: In fact, although [`futures::future::Fuse`][future_fuse] drops its
-    inner future after `Ready` -- and [`std::iter::Fuse`][iter_fuse] drops its
-    inner iterator after `None` -- [`futures::stream::Fuse`][stream_fuse]
-    actually does _not_ drop its inner stream after `Ready(None)` today. It
-    used to in the distant past, but that behavior [was removed when `Sink`
-    support was added][sink_pr]. If this RFC is accepted, arguably even if only
-    [RFC TODO][strict_future_rfc] is accepted, an `AsyncIterator` version of
-    `Fuse` must drop its inner stream.
+[^fuse]: In fact, [`futures::stream::Fuse`][stream_fuse] does _not_ drop its
+    inner stream after `Ready(None)` today. See the discussion in [RFC
+    TODO][strict_future_rfc] about changing this.
 
 [future_fuse]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
 [stream_fuse]: https://docs.rs/futures/latest/futures/stream/struct.Fuse.html
