@@ -102,7 +102,7 @@ async fn main() {
 
 Unfortunately, `bar_future` is holding the lock that `baz` wants to acquire.
 Either polling it or dropping it would release the lock, but `main` doesn't do
-either of those things while it waits on `baz`, so it deadlocks.
+either of those things while it waits on `baz`, so instead it deadlocks.
 
 Let's look closely at who gets polled when. If we [add some prints][squawk], we
 can see that `main` gets polled three times:
@@ -176,12 +176,12 @@ using `try_join`][try_join_deadlock].
 
 [try_join_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3Atry_join%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+-%3E+Result%3C%28%29%2C+%28%29%3E+%7B%0A++++foo%28%29.await%3B%0A++++Ok%28%28%29%29%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+error_in_5ms%28%29+-%3E+Result%3C%28%29%2C+%28%29%3E+%7B%0A++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++Err%28%28%29%29%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+bar_future+%3D+pin%21%28bar%28%29%29%3B%0A++++_+%3D+try_join%28bar_future%2C+error_in_5ms%28%29%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++baz%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
 
-The root of all evil in these cases is [the blanket `Future` impl for `Pin<&mut
-_>` references][blanket].[^pin] That impl means a `Pin<&mut _>` reference to a
-`Future` is itself a `Future`, except that dropping it has no effect. None of
-the deadlocks above work without it. If the strict `Future` contract requires
-us to drop cancelled futures promptly, then that impl is incorrect, and we
-should deprecate it. There's our warning in `main`.
+What all these deadlocks have in common is that they depend on [the blanket
+`Future` impl for `Pin<&mut _>` references][blanket].[^pin] That impl means a
+`Pin<&mut _>` reference to a `Future` is itself a `Future`, except that
+dropping it has no effect. If the strict `Future` contract requires us to drop
+cancelled futures promptly, then that impl is incorrect, and we should
+deprecate it. There's our warning in `main`.
 
 [^pin]: `pin!` is arguably also a red flag, but pinning per se doesn't have
     anything to do with control flow or wakeups. We often manage heterogenous
@@ -200,69 +200,55 @@ several reasons:
   functions that don't currently exist][fixing_main].
 
 All of those problems are solvable, but designing and rolling out new helper
-functions months or years, and it needs to happen in the crates ecosystem
-rather than in the standard library. Also, this ["cancellation by
+functions will take months or years, and it needs to happen in the crates
+ecosystem rather than in the standard library. Also, this ["cancellation by
 reference"][cancellation_by_reference] pattern isn't the only way to violate
 the strict `Future` contract today. [`AsyncIterator`] and [`Stream`] have
-similar deadlock bugs, and we'll need at least one follow-up RFC to address
-those. See below for [a longer list of problems][broken_patterns].
+similar deadlock bugs, and we'll need [at least one follow-up
+RFC][poll_progress_rfc] to address those. See below for [a longer list of
+broken patterns][broken_patterns].
 
 Instead of trying to fix everything everywhere all at once, this RFC proposes
 the smallest possible change: Document the strict `Future` contract. Once we
-agree about where the bugs are, we can start the long and gradual process of
+agree on where the bugs come from, we can start the long and gradual process of
 fixing them.
 
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-### `Future::poll` docs
+> This RFC proposes adding the following subsections (or similar) to the
+> [`Future`] docs.
 
-The `poll` method imposes two responsibilities on its caller:
+### The `Poll::Pending` rule
 
-1. If the last call to `poll` returned `Pending`, and the `Waker` passed to
-   that call is later invoked, and the future hasn't been dropped, the caller
-   should **`poll` again promptly.**
+**When a `Future` requests a wakeup, its owner must either `poll` it again
+promptly or drop it.**
 
-2. After `poll` returns `Ready(_)`, the caller should not call `poll` again and
-   should **drop the future promptly**. Further calls to `poll` may panic or
-   otherwise misbehave (within the bounds of safe code).[^exceptions]
-
-[^exceptions]: This is how we need to treat generic futures that we don't know
-    anything about. But specific types like [`Fuse`] or [`MaybeDone`], which
-    handle dropping internally and/or tolerate further calls to `poll` after
-    returning `Ready`, can document their exceptions to this rule.
-
-[`MaybeDone`]: https://docs.rs/futures/latest/futures/future/enum.MaybeDone.html
-[`Fuse`]: https://docs.rs/futures/latest/futures/future/trait.FutureExt.html#method.fuse
-
-#### Cancellation
-
-Unlike threads, which have a life of their own once they start running, a
-future only makes progress when something polls it. We could effectively pause
-the execution of a future by not polling it again. However, the
-"`Poll::Pending` rule" above generally forbids this. Whenever one of our child
-futures requests a wakeup, we must either poll it or drop it
-promptly.[^unknown] Dropping a future we don't want to poll anymore is called
-"cancellation".
+Unlike threads, which have a life of their own after they start running, a
+future only makes progress when it's polled. We could effectively pause the
+execution of a future by not polling it again. However, this is generally
+forbidden. Once you've called `poll` and passed in a `Waker`, you're required
+to call `poll` again when that `Waker` is invoked.[^unknown] This requirement
+repeats until `poll` returns `Poll::Ready`, unless you drop the future early.
+Dropping a pending future like this is called "cancellation".
 
 [^unknown]: Often we don't know which of our children triggered a given wakeup,
-    and we need to poll all of them every time we're polled. But it is possible
-    to know which child (or children) triggered a wakeup by giving each child a
-    unique `Waker`. [`FuturesUnordered`] does this, and most runtimes also do
-    this at the task level.
+    so we need to poll all of them every time we're polled. Alternatively, it's
+    possible to know which of our children triggered a wakeup if we give each
+    of them a unique `Waker`. [`FuturesUnordered`] does this, as do most
+    runtimes at the task level.
 
 This rule is essential for futures that acquire locks or other exclusive
-resources. When an async function takes a lock, the programmer needs to
-consider that it might release the lock sooner than expected if it's cancelled,
-or a bit later due to timer slack or CPU load. But because of the
-`Poll::Pending` rule, the programmer doesn't need to worry about the caller
-pausing execution and accidentally holding the lock _forever_.
+resources. When a future takes a lock, the programmer needs to consider that it
+might release that lock sooner than expected if it's cancelled, or a bit later
+due to timer slack or CPU load. But because of the `Poll::Pending` rule, the
+programmer doesn't need to worry about the future's caller pausing execution
+and accidentally holding the lock _forever_.
 
-#### Example
+### Example
 
-Here's an example of a future that fails the first requirement above, a.k.a.
-the "`Poll::Pending` rule". Every time this future is polled, it flips a coin
-to decide whether to poll its child:
+Here's an example of a future that fails the `Poll::Pending` rule. Every time
+this future is polled, it flips a coin to decide whether to poll its child:
 
 ```rust
 pub struct CoinFlip<Fut>(Pin<Box<Fut>>);
@@ -290,9 +276,6 @@ polled (which we might've intended), but also in distant and unrelated futures
 that happen to use the same shared resources. `CoinFlip` would be at fault for
 [those bugs][coin_flip].
 
-If we don't want to poll `self.0` here, the `Future` contract requires us to
-cancel it. There are broadly three ways to do that:
-
 [^first_time]: On the other hand, if `random` is false the first time, we might
     never poll `Fut`. Whether that's acceptable according to the `Future`
     contract is an open question. See [the unresolved questions
@@ -300,15 +283,9 @@ cancel it. There are broadly three ways to do that:
 
 [coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Apub+struct+CoinFlip%3CFut%3E%28Pin%3CBox%3CFut%3E%3E%29%3B%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.0.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60self.0%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60CoinFlip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60CoinFlip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60CoinFlip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+CoinFlip%28Box%3A%3Apin%28bar%28%29%29%29+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
 
-- Return `Ready` in the `else` branch, which requires the caller to drop
-  `CoinFlip` promptly. We'd probably need to change the `Output` type to
-  `Option` or `Result`.
-- Drop `self.0` in the `else` branch before returning `Pending`. In this case
-  `self.0` would need to be `Option<Fut>` or similar.
-- Panic in the `else` branch. This probably isn't what anyone wants, but it's
-  [technically correct][futurama].
-
-[futurama]: https://www.youtube.com/watch?v=aIzMuPMicGc&t=21s
+If we don't want to poll `self.0`, the `Future` contract requires us to cancel
+it. In this case `self.0` will need to be an `Option` or similar, and we'll
+need to clear it in the `else` branch.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -785,89 +762,6 @@ support in different ways. For an example of another macro in this space, see
     reference, in violation of the strict `Future` contract. If we don't allow
     that, `select!` loses a lot of its flexibility.
 
-### What's the point of the drop requirement after `Poll::Ready`?
-
-The focus of this RFC is the "`Poll::Pending` rule" about polling again
-promptly after a wakeup, but it also establishes a "`Poll::Ready` rule" about
-dropping a future promptly after it's finished. The benefit of this rule is
-that futures like [`Timeout`][`timeout`] and [`Race`] can contain their child
-futures directly (as they do today), without needing `Option`, [`MaybeDone`],
-or similar to represent the state where they've droped a child before being
-dropped themselves. Instead, they cancel their children indirectly by returning
-`Ready` and trusting that their caller will drop them promptly. In other words,
-`Timeout` and `Race` can rely on the `Poll::Ready` rule to guarantee that they
-follow the `Poll::Pending` rule.
-
-[`Race`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html
-
-Combinators like [`Join`] do need extra state to meet this requirement. When
-one side of a `Join` finishes, it needs to drop that future immediately,
-without waiting for the other side to finish. Most implementations of `Join`
-already do this today, using `MaybeDone` or similar, because it saves
-space.[^original_zip] (`MaybeDone` holds either a future or its output, but not
-both at the same time.)
-
-[`Join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
-
-[^original_zip]: The original implementation of the
-    [`futures_lite::future::Zip`] combinator did break this rule, but that was
-    [reported as a deadlock bug][zip_deadlock] and fixed in 2024.
-
-[`futures_lite::future::Zip`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.zip.html
-[zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
-
-Although most of the ecosystem already follows the `Poll::Ready` rule, there
-are some cases that will need to be fixed. Many of these will be
-backwards-compatible, but one likely exception is
-[`futures::stream::Fuse`][stream_fuse]. Unlike its [close Tokio
-cousin][tokio_stream_fuse] -- and also unlike
-[`futures::future::Fuse`][future_fuse] and
-[`std::iter::Fuse`][iter_fuse][^specialization] -- `futures::stream::Fuse` does
-_not_ currently drop its inner stream after it's done.[^sink] That means that
-combinators that use `Fuse` to manage their children (e.g. [`Zip`]), can break
-the `Poll::Ready` rule with child streams that own futures (e.g. [`Once`],
-[`TakeWhile`]). We should fix `Fuse`, making these combinators correct as
-written, but unfortunately that will break several of its public methods, which
-currently assume the inner stream is always present.
-
-[^specialization]: As an exception, `std::iter::Fuse` has [specialized
-    implementation] for `FusedIterator` types, which doesn't drop anything.
-
-[specialization]: https://github.com/rust-lang/rust/blob/1.99.0/library/core/src/iter/adapters/fuse.rs#L394-L404
-
-[^sink]: It used to in the distant past, but that behavior [was removed when
-    `Sink` support was added][sink_pr].
-
-[`Sink`]: https://docs.rs/futures/latest/futures/prelude/trait.Sink.html
-[sink_pr]: https://github.com/rust-lang/futures-rs/pull/226
-
-[future_fuse]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
-[stream_fuse]: https://docs.rs/futures/latest/futures/stream/struct.Fuse.html
-[tokio_stream_fuse]: https://docs.rs/tokio-stream/latest/tokio_stream/adapters/struct.Fuse.html
-[iter_fuse]: https://doc.rust-lang.org/std/iter/struct.Fuse.html
-[`Once`]: https://docs.rs/futures/latest/futures/stream/fn.once.html
-[`TakeWhile`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.take_while
-[`Zip`]: https://docs.rs/futures/latest/futures/stream/struct.Zip.html
-
-Some other cases that will need to be fixed (probably using a dropping version
-of `Fuse`):
-
-- [`futures::stream::IntoAsyncRead`] and [`tokio_util::io::StreamReader`] both
-  adapt a stream of `[u8]` slices into their respective IO reader traits, and
-  both of them can retain the underlying stream after it's done. This should be
-  backwards compatible for `IntoAsyncRead`, but `StreamReader` has public
-  accessor methods that don't currently return `Option`.
-
-[`futures::stream::IntoAsyncRead`]: https://docs.rs/futures/latest/futures/stream/struct.IntoAsyncRead.html
-[`tokio_util::io::StreamReader`]: https://docs.rs/tokio-util/latest/tokio_util/io/struct.StreamReader.html
-
-- The [`futures-concurrency`] implementations of [`RaceOk`] ("return the first
-  `Ok` ouput, unless all outputs are `Err`") for arrays and tuples don't drop
-  futures that return `Err`. This should be backwards compatible.
-
-[`futures-concurrency`]: https://github.com/yoshuawuyts/futures-concurrency
-[`RaceOk`]: https://docs.rs/futures-concurrency/latest/futures_concurrency/future/trait.RaceOk.html
-
 ### Could we statically identify futures that hold locks?
 [statically]: #could-we-statically-identify-futures-that-hold-locks
 
@@ -958,19 +852,19 @@ time, there are published `Future` extension methods (e.g. [`delay`] from
 [`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
 [wasmer]: https://github.com/wasmerio/wasmer/blob/dce84a907542c331661f201eff9d898ecb2fbe08/lib/virtual-net/src/rx_tx.rs#L171-L187
 
-### Should we document a requirement for when `poll` panics?
+### TODO: Should we require callers to drop futures after they return `Ready`?
 
-In addition to the "`Poll::Ready` rule" (drop promptly) and the
-"`Poll::Pending` rule" (poll again promptly after a wakeup), we could consider
-a third rule regarding panicking. For example:
+[`Timeout`] and [`Race`] need to add more state...
 
-> If `poll` panics without terminating the whole process, the caller should not
-> call `poll` again and should drop the future promptly.
+[`Timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
+[`Race`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html
 
-On the other hand, futures that use `catch_unwind` and therefore need to worry
-about this are extremely rare, and this isn't really a pressing concern for the
-ecosystem. We could also consider folding this into the `Poll::Ready` rule,
-since the requirement is the same.
+### How should the `Future` contract handle panics?
+
+If an `async fn` panics, its generated future drops all its locals and poisons
+itself before propagating that panic, so in practice it doesn't matter much
+whether its caller drops that future or not. Still, the `Future` contract
+should say what the requirement is.
 
 ## Future work
 [future-work]: #future-work
@@ -1018,7 +912,6 @@ TODO: `await all` ... `and` etc.
 [`SuspendThread`]: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-suspendthread
 [snooze]: https://jacko.io/snooze.html
 [`select!`]: https://tokio.rs/tokio/tutorial/select
-[`timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 [`AsyncIterator`]: https://doc.rust-lang.org/core/async_iter/trait.AsyncIterator.html
 [`Stream`]: https://docs.rs/futures/latest/futures/prelude/trait.Stream.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
@@ -1026,3 +919,4 @@ TODO: `await all` ... `and` etc.
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 [poll_progress_rfc]: ./0000-poll-progress.md
+[`Future`]: https://doc.rust-lang.org/std/future/trait.Future.html
