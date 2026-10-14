@@ -660,21 +660,24 @@ cleanup and by extension the borrow checker.
 ### Fixing `main`
 [fixing_main]: #fixing-main
 
-As a reminder, the broken `main` function in the `timeout` deadlock [at the
+As a reminder, the broken `main` function in the `select!` deadlock [at the
 top][motivation] looked like this ([playground link][select_deadlock]):
 
 ```rust
 // While `bar` is running, call `baz` every 5 ms.
 let mut bar_future = pin!(bar());
-while timeout(Duration::from_millis(5), &mut bar_future).await.is_err() {
-    baz().await; // Deadlock!
+loop {
+    select! {
+        _ = &mut bar_future => break,
+        _ = sleep(Duration::from_millis(5)) => baz().await, // Deadlock!
+    }
 }
 ```
 
 We'd like to factor out the `baz` loop into its own `async` block and run it
 concurrently, but we can't [`join`] that block with `bar`, because it never
-returns. If we wanted to stick with existing, widely-used helpers, we could use
-`select!` ([playgroud link][select_baz_loop]):[^cancellation_token]
+returns. One option here is to reorganize our `select!` to put the loop on the
+inside ([playgroud link][select_baz_loop]):[^cancellation_token]
 
 [`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 
@@ -729,26 +732,24 @@ async fn join_maybe<Fut1: Future, Fut2: Future>(
 Here's what our `main` function would look like using `join_maybe` instead of
 `select!` ([playground link][join_maybe]):
 
-[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++join_maybe%28%0A++++++++bar%28%29%2C%0A++++++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++++++async+%7B%0A++++++++++++loop+%7B%0A++++++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++++++baz%28%29.await%3B%0A++++++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++++++%7D%0A++++++++%7D%2C%0A++++%29%0A++++.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
+[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
 
 ```rust
-join_maybe(
-    bar(),
-    // While `bar` is running, call `baz` every 5 ms.
-    async {
-        loop {
-            sleep(Duration::from_millis(5)).await;
-            baz().await;
-        }
-    },
-).await;
+// While `bar` is running, call `baz` every 5 ms.
+let baz_loop = async {
+    loop {
+        sleep(Duration::from_millis(5)).await;
+        baz().await;
+    }
+};
+join_maybe(bar(), baz_loop).await;
 ```
 
 That's a bit cleaner. But note that the `select!` macro is [extremely
 flexible][mini_redis],[^flexible] and this is just one of its simplest use
 cases. There's a wide open design space for other helpers that mix joining,
-selecting, cancellation, shared mutability, error handling, and `no_std`
-support in different ways. For an example of another macro in this space, see
+racing, cancellation, shared mutability, error handling, and `no_std` support
+in different ways. For an example of another macro in this space, see
 [`join_me_maybe::join!`][join_me_maybe].
 
 [join_me_maybe]: https://docs.rs/join_me_maybe/latest/join_me_maybe/
