@@ -216,20 +216,18 @@ fixing them.
 ## Guide-level explanation
 [guide-level-explanation]: #guide-level-explanation
 
-> This RFC proposes adding the following subsections (or similar) to the
-> [`Future`] docs.
+> This RFC proposes adding the following text (or similar) to the [`Future`]
+> docs.
 
-### The `Poll::Pending` rule
-
-**When a `Future` requests a wakeup, its owner must either `poll` it again
-promptly or drop it.**
+**When a pending `Future` requests a wakeup, its owner must either `poll` it
+again promptly or drop it.**
 
 Unlike threads, which have a life of their own after they start running, a
-future only makes progress when it's polled. We could effectively pause the
-execution of a future by not polling it again. However, this is generally
-forbidden. Once you've called `poll` and passed in a `Waker`, you're required
-to call `poll` again when that `Waker` is invoked.[^unknown] This requirement
-repeats until `poll` returns `Poll::Ready`, unless you drop the future early.
+future only makes progress when it's polled. If you stop polling a future for a
+while, you can effectively pause its execution. However, the "poll promptly"
+rule forbids this. Once you've called `poll` and given the future a `Waker`,
+you're required to poll it again when that `Waker` is invoked.[^unknown] This
+requirement repeats until `poll` returns `Ready` or you drop the future.
 Dropping a pending future like this is called "cancellation".
 
 [^unknown]: Often we don't know which of our children triggered a given wakeup,
@@ -238,29 +236,22 @@ Dropping a pending future like this is called "cancellation".
     of them a unique `Waker`. [`FuturesUnordered`] does this, as do most
     runtimes at the task level.
 
-This rule is essential for futures that acquire locks or other exclusive
-resources. When a future takes a lock, the programmer needs to consider that it
-might release that lock sooner than expected if it's cancelled, or a bit later
-due to timer slack or CPU load. But because of the `Poll::Pending` rule, the
-programmer doesn't need to worry about the future's caller pausing execution
-and accidentally holding the lock _forever_.
-
-### Example
-
-Here's an example of a future that fails the `Poll::Pending` rule. Every time
-this future is polled, it flips a coin to decide whether to poll its child:
+Here's an example of a future that fails the "poll promptly" rule. Every time
+`CoinFlip` is polled, it flips a coin to decide whether to poll its child:
 
 ```rust
-pub struct CoinFlip<Fut>(Pin<Box<Fut>>);
+struct CoinFlip<Fut> {
+    inner: Pin<Box<Fut>>,
+}
 
 impl<Fut: Future> Future for CoinFlip<Fut> {
     type Output = Fut::Output;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Fut::Output> {
         if rand::random() {
-            self.0.as_mut().poll(cx)
+            self.inner.as_mut().poll(cx)
         } else {
-            // XXX: `self.0` might have requested a wakeup. Returning without polling it here
+            // XXX: `inner` might have requested a wakeup. Returning without polling it here
             // violates the `Future` contract.
             Poll::Pending
         }
@@ -268,9 +259,9 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 }
 ```
 
-The problem is that `random()` might be true the first time, polling `self.0`
+The problem is that `random()` might be true the first time, polling `inner`
 letting it register wakeups, but then it might be false the second time when
-those wakeups trigger, failing to poll `self.0` promptly.[^first_time] This
+those wakeups trigger, failing to poll `inner` promptly.[^first_time] This
 tends to cause hangs and deadlocks, not only in the future that didn't get
 polled (which we might've intended), but also in distant and unrelated futures
 that happen to use the same shared resources. `CoinFlip` would be at fault for
@@ -281,11 +272,13 @@ that happen to use the same shared resources. `CoinFlip` would be at fault for
     contract is an open question. See [the unresolved questions
     section](#should-we-allow-an-indefinite-delay-between-creation-and-polling).
 
-[coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Apub+struct+CoinFlip%3CFut%3E%28Pin%3CBox%3CFut%3E%3E%29%3B%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.0.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60self.0%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60CoinFlip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60CoinFlip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60CoinFlip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+CoinFlip%28Box%3A%3Apin%28bar%28%29%29%29+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
+[coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Astruct+CoinFlip%3CFut%3E+%7B%0A++++inner%3A+Pin%3CBox%3CFut%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut%3A+Future%3E+CoinFlip%3CFut%3E+%7B%0A++++fn+new%28inner%3A+Fut%29+-%3E+Self+%7B%0A++++++++Self+%7B%0A++++++++++++inner%3A+Box%3A%3Apin%28inner%29%2C%0A++++++++%7D%0A++++%7D%0A%7D%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.inner.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60inner%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60CoinFlip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60CoinFlip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60CoinFlip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+CoinFlip%3A%3Anew%28bar%28%29%29+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
 
-If we don't want to poll `self.0`, the `Future` contract requires us to cancel
-it. In this case `self.0` will need to be an `Option` or similar, and we'll
-need to clear it in the `else` branch.
+If we don't want to poll `inner`, the `Future` contract requires us to cancel
+it. We could wrap it in an `Option` or similar and clear it in the `else`
+branch. This means getting `false` from `random()` is permanent, which might
+not be what we wanted when we wrote `CoinFlip`, but there's no correct way to
+make it temporary.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
