@@ -1087,9 +1087,9 @@ cancel its children by returning `Done`.
 
 ### TODO: `try_fold`?
 
-### TODO: Should we allow an indefinite delay between creation and polling?
-
 "The purpose of an iterator is to iterate."
+
+### TODO: Should we allow an indefinite delay between creation and polling?
 
 ## Prior art
 [prior-art]: #prior-art
@@ -1180,157 +1180,14 @@ approach might be better for consistency.
 ## Future possibilities
 [future-possibilities]: #future-possibilities
 
-### Clarifying the `Future` contract
-
-The second deadlock in the "What about `.next()`?" section isn't really
-specific to `AsyncIterator`. We can reproduce it using only `Future`
-([playground link][future_deadlock]):
-
-[future_deadlock]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0A%2F%2F+%60do_work%60+takes+a+private+lock%2C+sleeps+briefly%2C+and+releases+it.%0A%2F%2F+A+deadlock+here+shouldn%27t+be+possible.%0Aasync+fn+do_work%28%29+%7B%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+my_future+%3D+pin%21%28do_work%28%29%29%3B%0A++++_+%3D+timeout%28Duration%3A%3Afrom_millis%281%29%2C+my_future%29.await%3B%0A++++println%21%28%22We+make+it+here...%22%29%3B%0A++++do_work%28%29.await%3B%0A++++println%21%28%22...but+not+here%21%22%29%3B%0A%7D>
-
-```rs
-let my_future = pin!(do_work());
-_ = tokio::time::timeout(Duration::from_millis(1), my_future).await;
-do_work().await; // Deadlock!
-```
-
-Who's "at fault" there? This example doesn't generate any warnings or fail any
-lints today. Maybe it should. Above we wrote:
-
-> To satisfy the proposed contract, whatever's driving an `AsyncIterator`
-> generally needs to _own_ it.
-
-The relevant part of the contract is that we should poll again promptly after a
-wakeup, but that's just as important for `Future` as it is for `AsyncIterator`.
-Should we explicitly document that either polling a future promptly or dropping
-it promptly is required after a wakeup? Should we deprecate functions and types
-that can't uphold that rule? Does that include the blanket `Future` impls on
-[`&mut _`][future_blanket_mut] and [`Pin<&mut _>`][future_blanket_pin]? They
-can't be removed at this point, but we could warn or lint on code that uses
-them.
-
-> TODO: Delete this section and move the description of this warning to the
-> other RFC.
-
-We could also warn whenever an idle `Future`/`AsyncIterator` crosses a
-suspension point.[^alternatively] That might not cover e.g. `Vec<Box<dyn
-Future>>`, but most `Future` containers are themselves futures or async
-iterators, and there might not be many exceptions in practice. Note that unlike
-an `async fn`, the body of an `async gen fn` isn't required to begin executing
-promptly (e.g. if it winds up on the right side of a [`Chain`]), so any
-`Future`/`AsyncIterator` argument to an `async gen fn` is inherently idle
-across a suspension point and would trigger this warning.
-
-[future_blanket_mut]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
-[future_blanket_pin]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
-
-[^alternatively]: On the other hand, we could decide that holding an idle
-    `Future` across a suspension point is ok, as long as that future hasn't
-    ever been polled. In other words, that it's ok to have a long delay between
-    calling an `async fn` and actually starting to run it. For example, the
-    `async_std` version of `FutureExt` provides a [`delay`] method that does
-    this internally. This isn't inherently prone to any of the deadlocks above,
-    but it could be if we wrote `do_work` in a sync-then-async style, like
-    this:
-    ```rs
-    fn do_work() -> impl Future<Output = ()> {
-        static LOCK: Mutex<()> = Mutex::const_new(());
-        // Try to acquire the lock synchronously. If we get it, the returned future takes ownership of the guard.
-        let mut _guard = LOCK.try_lock().ok();
-        async move {
-            if _guard.is_none() {
-                _guard = Some(LOCK.lock().await);
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-    ```
-    Should we try to define a rule that this function is breaking?
-
-[`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
-
-Either of those warnings could've caught ["Futurelock"][futurelock] before it
-happened. On the other hand, there are also many `select!` loops in the wild
-that would trigger them today, where it isn't clear what we should be doing
-instead. Task spawning is a common alternative, but it [isn't always an
-option][mini_redis]. Improving this situation might require [new
-macros](https://github.com/oconnor663/join_me_maybe) or possibly new syntax.
-Speaking of which...
-
 ### Concurrency syntax
 
-> TODO: Move this section to the other RFC.
-
-In this RFC we can only introduce concurrency into async iteration with helpers
-like `Merge` or `Buffer1`, which are written "by hand" using the
-`AsyncIterator` API. We can't write a concurrent iterator using `async gen fn`
-by itself. But it's interesting to consider how that could change.
-
-An `async fn` (not a generator) can get concurrency in its body using a `join!`
-macro, which is "almost like syntax". For example:
+[RFC TODO][strict_future_rfc] mentions dedicated concurrency syntax in its
+"Future Possibilities" section. It's interesting to consider how yielding from
+concurrent blocks might work in that syntax:
 
 ```rs
-async fn foo() {
-    join!(
-        async {
-            do_stuff().await;
-        },
-        async {
-            do_other_stuff().await;
-        },
-    );
-}
-```
-
-This works today, though you'll notice some rough edges if you try to `return`
-or `?` in either of those blocks. But the `async gen fn` equivalent doesn't
-work at all:
-
-```rs
-async gen fn foo() {
-    join!(
-        async {
-            yield; // error
-        },
-        ...
-    );
-}
-```
-
-What if there was some hypothetical built-in syntax for writing the `async fn`
-above? Maybe it could support error handling and other short-circuiting
-operations (`break`, `continue`) more gracefully:
-
-```rs
-async fn bar() -> anyhow::Result<()> {
-    await all {
-        do_stuff().await?;
-    } and {
-        do_other_stuff().await?;
-    }
-    Ok(())
-}
-```
-
-> Tangent #1: It could be sound to allow conflicting mutable borrows on both
-> sides here, as long as they don't cross a suspension point. That would be a
-> second example of control flow that only async code can express, along with
-> cancellation.
-
-> Tangent #2: The syntax bikeshedding for a feature like this would be intense,
-> of course, but an interesting feature of `await all`...`and` is that it
-> suggests a counterpart, `await any`...`or`. The former could have branches of
-> different types, and it would evaluate to a tuple, while the latter would
-> have branches of the same type, and it would evaluate to a single value. This
-> would be "the built-in version of `select!`". It could also allow conflicting
-> _moves_ after the final suspension point in each branch, since only one
-> branch ever makes it that far.
-
-What if that hypothetical syntax also supported _yielding_? What might _this_
-do?
-
-```rs
-async gen fn bar() -> u32 {
+async gen fn my_concurrent_generator() -> u32 {
     await all {
         yield do_stuff().await;
     } and {
@@ -1339,7 +1196,11 @@ async gen fn bar() -> u32 {
 }
 ```
 
-Could you implement `merge` like _this_?
+After one block yields, `poll_progress` would need to keep driving the other
+block(s) to a yield point (if any), and each block would need stack space to
+buffer an item.
+
+Could we implement `merge` like this?
 
 ```rs
 async gen fn merge<Other>(self, other: Other) -> Self::Item
@@ -1358,8 +1219,13 @@ where
 }
 ```
 
-> TODO: On the other hand, would this warn about an `AsyncIterator` living
-> across a suspension point?
+Almost! One difference is that the `Merge` struct will (probably) always
+forward `poll_progress` to both its children, even in the case where
+`poll_next` has never been called (e.g. on the right side of a [`Chain`]). But
+in this `async gen fn` version, if `poll_next` has never been called, then
+control hasn't entered either of the `for await` loops. We haven't done the
+`IntoAsyncIterator::into_async_iter` conversion yet, and we won't/can't forward
+`poll_progress`. That might be an unfortunate footgun.
 
 ### Generalized coroutines
 

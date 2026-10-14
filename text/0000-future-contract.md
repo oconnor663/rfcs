@@ -1035,7 +1035,8 @@ short-circuiting. It's annoying to use `return` or `?` in an `async` block,
 because they only short-circuit the block, not the calling function. It's also
 impossible to `break` or `continue` a loop outside the block. With concurrency
 syntax, all of these could work naturally. An especially interesting
-possibility would be `yield`ing from concurrent blocks in an `async gen fn`.
+possibility would be `yield`ing from concurrent blocks in an `async gen fn`,
+see [RFC TODO][poll_progress_rfc].
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 ["Futurelock"]: https://rfd.shared.oxide.computer/rfd/0609
