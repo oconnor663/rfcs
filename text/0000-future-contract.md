@@ -493,6 +493,8 @@ _ = timeout(Duration::from_millis(5), bar_future.clone()).await;
 baz().await; // Deadlock!
 ```
 
+#### TODO: `Timeout` doesn't drop the cancelled future?
+
 #### Userspace executors
 [userspace_executors]: #userspace-executors
 
