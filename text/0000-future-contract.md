@@ -220,15 +220,16 @@ fixing them.
 > docs.
 
 **When a pending `Future` requests a wakeup, its owner must either `poll` it
-again promptly or drop it.**
+promptly or drop it.**
 
 Unlike threads, which have a life of their own after they start running, a
 future only makes progress when it's polled. If you stop polling a future for a
 while, you can effectively pause its execution. However, the "poll promptly"
-rule forbids this. Once you've called `poll` and given the future a `Waker`,
-you're required to poll it again when that `Waker` is invoked.[^unknown] This
+rule forbids this. Once you've polled a future and given it a `Waker`, you're
+required to poll it again when it invokes that `Waker`.[^unknown] This
 requirement repeats until `poll` returns `Ready` or you drop the future.
-Dropping a pending future like this is called "cancellation".
+Dropping a pending future because you don't want to poll it anymore is called
+"cancellation".
 
 [^unknown]: Often we don't know which of our children triggered a given wakeup,
     so we need to poll all of them every time we're polled. Alternatively, it's
@@ -236,8 +237,9 @@ Dropping a pending future like this is called "cancellation".
     of them a unique `Waker`. [`FuturesUnordered`] does this, as do most
     runtimes at the task level.
 
-Here's an example of a future that fails the "poll promptly" rule. Every time
-`CoinFlip` is polled, it flips a coin to decide whether to poll its child:
+Here's an example of a future adapter that fails the "poll promptly" rule
+above. Every time `CoinFlip` is polled, it flips a coin to decide whether to
+poll its child:
 
 ```rust
 struct CoinFlip<Fut> {
@@ -492,8 +494,6 @@ let bar_future = bar().shared();
 _ = timeout(Duration::from_millis(5), bar_future.clone()).await;
 baz().await; // Deadlock!
 ```
-
-#### TODO: `Timeout` doesn't drop the cancelled future?
 
 #### Userspace executors
 [userspace_executors]: #userspace-executors
@@ -848,19 +848,80 @@ time, there are published `Future` extension methods (e.g. [`delay`] from
 [`delay`]: https://docs.rs/async-std/latest/async_std/prelude/trait.FutureExt.html#method.delay
 [wasmer]: https://github.com/wasmerio/wasmer/blob/dce84a907542c331661f201eff9d898ecb2fbe08/lib/virtual-net/src/rx_tx.rs#L171-L187
 
-### TODO: Should we require callers to drop futures after they return `Ready`?
+### Should we require callers to drop futures promptly after they return `Ready`?
 
-[`Timeout`] and [`Race`] need to add more state...
+In practice we almost always drop futures as soon as they return `Ready`.
+`.await` expressions do that automatically, and combinators like `Join` often
+do the same using `Fuse` internally. However, this behavior isn't required by
+the contract, so it's problematic to rely on it for correctness. One place
+where we currently rely on it is [`Timeout`], which [looks like
+this][timeout_src]:
 
 [`Timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
-[`Race`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.race.html
+[timeout_src]: https://github.com/tokio-rs/tokio/blob/tokio-1.53.3/tokio/src/time/timeout.rs#L176-L181
 
-### How should the `Future` contract handle panics?
+```rust
+pub struct Timeout<T> {
+    #[pin]
+    value: T,
+    #[pin]
+    delay: Sleep,
+}
+```
 
-If an `async fn` panics, its generated future drops all its locals and poisons
-itself before propagating that panic, so in practice it doesn't matter much
-whether its caller drops that future or not. Still, the `Future` contract
-should say what the requirement is.
+The future (`value`) is stored directly in the `Timeout` struct, not wrapped in
+an `Option` or similar, so `Timeout` can't explicitly drop it. This works as
+long as the caller drops `Timeout` as soon as it returns `Ready`, but again
+that's not strictly required. Here's an example where the caller doesn't drop
+`Timeout` promptly, causing a deadlock ([playground
+link][ready_rule_playground]):
+
+[ready_rule_playground]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%2C+timeout%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++select%21+%7B%0A++++++++biased%3B%0A++++++++Ok%28_%29+%3D+timeout%28Duration%3A%3Afrom_millis%285%29%2C+bar%28%29%29+%3D%3E+%7B%7D%0A++++++++_+%3D+async+%7B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D+%3D%3E+%7B%7D%0A++++%7D%0A%7D>
+
+```rust
+select! {
+    biased;
+    Ok(_) = timeout(Duration::from_millis(5), bar()) => {}
+    _ = baz() => {} // Deadlock!
+}
+```
+
+This example is especially subtle:
+
+1. The `biased` keyword means that first arm always acquires `LOCK` first.
+2. The `timeout` expires after 5 ms, and polling it returns `Ready(Err(_))`.
+3. Normally `select!` would drop all its future arguments as soon as one of
+   them is `Ready`. However, the `Ok(_)` pattern fails to match here, so
+   `select!` keeps polling the second arm. At least as of Tokio v1.53.3,
+   `select!` doesn't drop individual arms while others are still getting
+   polled.
+4. The `Timeout` future still holds the `bar` future, which still holds the
+   `LOCK` guard, so the `baz` future is deadlocked.
+
+Maybe we'd like to change the behavior of `select!` in step #3,[^original_zip]
+but the key question here is whether `Timeout` can _assume_ that its callers
+will never behave like this. As written, the strict `Future` contract blames
+`Timeout` for this deadlock, because it stopped polling `bar` while it was
+still pending, without ensuring that it would get dropped promptly. We need to
+fix `Timeout` by wrapping `value` in an `Option` or similar and explicitly
+clearing it in the cancelled case.
+
+That's doable, but are we happy about it? Would it be cleaner to say that the
+`Timeout` struct definition above is correct, and to explicitly require callers
+to drop futures promptly after they return `Ready`? Either approach could be
+reasonable. Another relevant data point here is that `async fn` futures do
+_not_ rely on their callers to drop them; they drop local variables internally
+before returning `Ready`.
+
+[^original_zip]: The original implementation of the
+    [`futures_lite::future::Zip`] combinator had a similar issue, which was
+    [reported as a deadlock bug][zip_deadlock] and fixed in 2024.
+
+[`futures_lite::future::Zip`]: https://docs.rs/futures-lite/latest/futures_lite/future/fn.zip.html
+[zip_deadlock]: https://github.com/smol-rs/futures-lite/issues/105
+
+If we do require callers to drop ready futures, it probably also makes sense to
+require callers to drop futures that panic.
 
 ## Future work
 [future-work]: #future-work
