@@ -944,9 +944,98 @@ the new patterns are stable enough to deprecate the old ones.
 
 See [RFC TODO][poll_progress_rfc].
 
-### New syntax
+### Concurrency syntax
 
-TODO: `await all` ... `and` etc.
+Here's a pie-in-the-sky idea.
+
+One of the reasons `select!` is widely used is that it can [work around borrow
+checker limitations][mini_redis]. Here's a `join` example that doesn't compile
+([playground link][join_error]):
+
+[join_error]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3Ajoin%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+x+%3D+0%3B%0A++++let+fut1+%3D+async+%7B%0A++++++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++++++x+%2B%3D+1%3B%0A++++%7D%3B%0A++++let+fut2+%3D+async+%7B%0A++++++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++++++x+%2B%3D+1%3B+%2F%2F+error%3A+cannot+borrow+%60x%60+as+mutable+more+than+once+at+a+time%0A++++%7D%3B%0A++++join%28fut1%2C+fut2%29.await%3B%0A++++assert_eq%21%28x%2C+2%29%3B%0A%7D>
+
+```rust
+let mut x = 0;
+let fut1 = async {
+    sleep(Duration::from_secs(1)).await;
+    x += 1;
+};
+let fut2 = async {
+    sleep(Duration::from_secs(1)).await;
+    x += 1; // error: cannot borrow `x` as mutable more than once at a time
+};
+join(fut1, fut2).await;
+assert_eq!(x, 2);
+```
+
+The problem there is that both `fut1` and `fut2` implicitly borrow `&mut x`. We
+can work around that problem with a `select!` ([playground
+link][select_workaround]):
+
+[select_workaround]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3A%7BFusedFuture%2C+FutureExt%7D%3B%0Ause+std%3A%3Apin%3A%3Apin%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+x+%3D+0%3B%0A++++let+mut+fut1+%3D+pin%21%28sleep%28Duration%3A%3Afrom_secs%281%29%29.fuse%28%29%29%3B%0A++++let+mut+fut2+%3D+pin%21%28sleep%28Duration%3A%3Afrom_secs%281%29%29.fuse%28%29%29%3B%0A++++loop+%7B%0A++++++++select%21+%7B%0A++++++++++++_+%3D+%26mut+fut1%2C+if+%21fut1.is_terminated%28%29+%3D%3E+x+%2B%3D+1%2C%0A++++++++++++_+%3D+%26mut+fut2%2C+if+%21fut2.is_terminated%28%29+%3D%3E+x+%2B%3D+1%2C%0A++++++++++++else+%3D%3E+break%2C%0A++++++++%7D%0A++++%7D%0A++++assert_eq%21%28x%2C+2%29%3B%0A%7D>
+
+```rust
+let mut x = 0;
+let mut fut1 = pin!(sleep(Duration::from_secs(1)).fuse());
+let mut fut2 = pin!(sleep(Duration::from_secs(1)).fuse());
+loop {
+    select! {
+        _ = &mut fut1, if !fut1.is_terminated() => x += 1,
+        _ = &mut fut2, if !fut2.is_terminated() => x += 1,
+        else => break,
+    }
+}
+assert_eq!(x, 2);
+```
+
+Code like this is a pain to read and write. It uses `select!` to implement a
+`join`, which is counterintuitive. It needs pinning, fusing, and a couple
+non-obvious bits of macro syntax. And of course, it's prone to deadlocks, which
+is why this RFC wants to ban it. But these loops are surprisingly common in the
+wild, because they're one of the only ways to do concurrent mutation without
+locks or atomics. They work because the `select!` macro lowers all its `=>`
+expressions to a single `match`, and the borrow checker can see that only one
+of the `match` arms runs.
+
+What if there was something like the straightforward `join` example above that
+the borrow checker could understand? Let's make up some hypothetical syntax:
+
+```rust
+let mut x = 0;
+await all {
+    sleep(Duration::from_secs(1)).await;
+    x += 1;
+} and {
+    sleep(Duration::from_secs(1)).await;
+    x += 1;
+}
+assert_eq!(x, 2);
+```
+
+The key idea here is that, even though both of those arms mutate `x`, neither
+of them retains `&mut x` across a suspension point, so they don't conflict with
+each other. This wouldn't be sound if the two arms were independent futures
+that could escape to different threads, but in this syntax they're tied
+together. In effect, the whole `await all` expression borrows `x` once, and the
+individual arms reborrow `x` temporarily when they're polled. The borrow
+checker could verify that.
+
+The syntax bikeshedding for a feature like this would be intense, of course,
+but an interesting feature of `await all`...`and`\[...`and`\] is that it
+suggests a counterpart, `await any`...`or`\[...`or`\]. The former could have
+arms of different types, and it would evaluate to a tuple, while the latter
+would require arms of the same type, and it would evaluate to a single value.
+In other words, `await all` would be a built-in `join!`, and `await any` would
+be a built-in `select!`. `await any` could also allow conflicting _moves_ after
+the final suspension point in each arm, since only one arm would make it that
+far.
+
+Another upside of syntax like this would be better ergonomics for
+short-circuiting. It's annoying to use `return` or `?` in an `async` block,
+because they only short-circuit the block, not the calling function. It's also
+impossible to `break` or `continue` a loop outside the block. With concurrency
+syntax, all of these could work naturally. An especially interesting
+possibility would be `yield`ing from concurrent blocks in an `async gen fn`.
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 ["Futurelock"]: https://rfd.shared.oxide.computer/rfd/0609
