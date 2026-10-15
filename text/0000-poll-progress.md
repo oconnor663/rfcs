@@ -1059,9 +1059,30 @@ better than confusing control flow bugs. We can't do this for the
 `PollNext::Item` rule, and callers who overlook that one will miss wakeups, but
 for the `PollNext::Pending` rule we can do it.
 
-### TODO: `try_fold`?
+### Internal iteration
 
-"The purpose of an iterator is to iterate."
+There's been [some discussion over the years][discussion] about whether
+[`Iterator::try_fold`] would've been a better basic building block for
+iteration than [`Iterator::next`]. It tends to make things easier on the
+optimizer. As Scott McMurray once said, "The purpose of an `Iterator` is to
+iterate, not to stop." Could the same be true of `AsyncIterator`?
+
+[discussion]: https://internals.rust-lang.org/t/brainstorming-allowing-implementing-just-try-fold-and-getting-next-free/9417
+[`Iterator::try_fold`]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#method.try_fold
+[`Iterator::next`]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#tymethod.next
+
+An important detail here is that `Iterator::try_fold` takes `&mut self`. In
+fact even if it didn't, there's a [blanket `Iterator` impl for `&mut _`
+references][iterator_blanket], which lets us call all of `Iterator`'s `self`
+methods from a mutable reference. But for all the reasons discussed above,
+`AsyncIterator` won't support iteration by reference. It won't be possible for
+`AsyncIterator` to implement `next` or `poll_next` in terms of `try_fold`.
+
+[iterator_blanket]: https://doc.rust-lang.org/std/iter/trait.Iterator.html#impl-Iterator-for-%26mut+I
+
+Perhaps `AsyncIterator` could define some sort of hybrid `poll_try_fold`? That
+could be an interesting optimization, but it's not clear whether anybody wants
+that to be the fundamental building block of async iteration.
 
 ## Prior art
 [prior-art]: #prior-art
