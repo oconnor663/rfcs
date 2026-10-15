@@ -205,8 +205,8 @@ ecosystem rather than in the standard library. Also, this ["cancellation by
 reference"][cancellation_by_reference] pattern isn't the only way to violate
 the strict `Future` contract today. [`AsyncIterator`] and [`Stream`] have
 similar deadlock bugs, and we'll need [at least one follow-up
-RFC][poll_progress_rfc] to address those. See below for [a longer list of
-broken patterns][broken_patterns].
+RFC][poll_progress_rfc] to address those. See below for [a list of broken
+patterns][broken_patterns].
 
 Instead of trying to fix everything everywhere all at once, this RFC proposes
 the smallest possible change: Document the strict `Future` contract. Once we
@@ -263,11 +263,11 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 
 The problem is that `random()` might be true the first time, polling `inner`
 letting it register wakeups, but then it might be false the second time when
-those wakeups trigger, failing to poll `inner` promptly.[^first_time] This
-tends to cause hangs and deadlocks, not only in the future that didn't get
+one of those wakeups triggers, failing to poll `inner` promptly.[^first_time]
+This tends to cause hangs and deadlocks, not only in the future that didn't get
 polled (which we might've intended), but also in distant and unrelated futures
-that happen to use the same shared resources. `CoinFlip` would be at fault for
-[those bugs][coin_flip].
+that happen to use the same shared resources ([playground link][coin_flip]).
+`CoinFlip` would be at fault for those bugs.
 
 [^first_time]: On the other hand, if `random` is false the first time, we might
     never poll `Fut`. Whether that's acceptable according to the `Future`
@@ -276,11 +276,11 @@ that happen to use the same shared resources. `CoinFlip` would be at fault for
 
 [coin_flip]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Aselect%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0A%2F%2F+A+couple+trivial+wrapper+functions%2C+to+make+the+deadlock+below+less+%22obvious%22.%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Astruct+CoinFlip%3CFut%3E+%7B%0A++++inner%3A+Pin%3CBox%3CFut%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut%3A+Future%3E+CoinFlip%3CFut%3E+%7B%0A++++fn+new%28inner%3A+Fut%29+-%3E+Self+%7B%0A++++++++Self+%7B%0A++++++++++++inner%3A+Box%3A%3Apin%28inner%29%2C%0A++++++++%7D%0A++++%7D%0A%7D%0A%0Aimpl%3CFut%3A+Future%3E+Future+for+CoinFlip%3CFut%3E+%7B%0A++++type+Output+%3D+Fut%3A%3AOutput%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CFut%3A%3AOutput%3E+%7B%0A++++++++if+rand%3A%3Arandom%28%29+%7B%0A++++++++++++self.inner.as_mut%28%29.poll%28cx%29%0A++++++++%7D+else+%7B%0A++++++++++++%2F%2F+XXX%3A+%60inner%60+might+have+requested+a+wakeup.+Returning+without+polling+it+here%0A++++++++++++%2F%2F+violates+the+%60Future%60+contract.%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+iteration+%3D+0%3B%0A++++loop+%7B%0A++++++++iteration+%2B%3D+1%3B%0A++++++++dbg%21%28iteration%29%3B%0A++++++++%2F%2F+This+deadlocks+25%25+of+the+time%2C+so+we+run+it+in+a+loop.+We+need+three+things+to+happen%3A%0A++++++++%2F%2F+++1.+%60select%21%60+polls+%60CoinFlip%60+first.+The+%60biased%60+keyword+guarantees+this.%0A++++++++%2F%2F+++2.+The+first+poll+of+%60CoinFlip%60+flips+%60true%60%2C+so+%60bar%60+acquires+%60LOCK%60.%0A++++++++%2F%2F+++3.+The+second+poll+of+%60CoinFlip%60+flips+%60false%60%2C+so+%60bar%60+never+releases+%60LOCK%60.%0A++++++++select%21+%7B%0A++++++++++++biased%3B%0A++++++++++++_+%3D+CoinFlip%3A%3Anew%28bar%28%29%29+%3D%3E+%7B%7D%0A++++++++++++_+%3D+baz%28%29+%3D%3E+%7B%7D+%2F%2F+Maybe+deadlock%21%0A++++++++%7D%0A++++%7D%0A%7D>
 
-If we don't want to poll `inner`, the `Future` contract requires us to cancel
-it. We could wrap it in an `Option` or similar and clear it in the `else`
-branch. This means getting `false` from `random()` is permanent, which might
-not be what we wanted when we wrote `CoinFlip`, but there's no correct way to
-make it temporary.
+If we don't want to poll `inner` here, the `Future` contract requires us to
+cancel it. We could wrap it in an `Option` or similar and clear it in the
+`else` branch. That makes a `false` coin flip permanent, which might not be
+what we wanted when we wrote `CoinFlip`, but there's no correct way to make it
+temporary.
 
 ## Reference-level explanation
 [reference-level-explanation]: #reference-level-explanation
@@ -408,7 +408,7 @@ concurrency issue. After a concurrent stream yields an item, nothing drives its
 other child streams until the next item is requested. Here we'll use [`merge`]
 for concurrency ([playground link][concurrent_for_each_deadlock]), but we could
 do the same thing with [`buffered`] streams ([playground
-link][buffered_deadlock]) or with [`FuturesUnordered`] ([playground
+link][buffered_deadlock]) or [`FuturesUnordered`] ([playground
 link][futures_unordered_deadlock]):[^unique][^fair]
 
 [`merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
@@ -525,8 +525,8 @@ fn main() {
 
 #### `poll!`
 
-The [`poll!`] macro is somewhat low-level, but it's the most direct way to
-demonstrate these deadlocks ([playground link][poll_deadlock]):
+The [`poll!`] macro is somewhat low-level, but it's arguably the most direct
+way to produce these deadlocks ([playground link][poll_deadlock]):
 
 [`poll!`]: https://docs.rs/futures/latest/futures/macro.poll.html
 
@@ -704,19 +704,19 @@ finish. Let's call it `join_maybe`:
 [roll]: https://old.reddit.com/r/rust/comments/1risdcd/never_snooze_a_future/o89qor8/
 
 ```rust
-/// Run a "definitely" future and a "maybe" future concurrently. If the definitely future finishes
-/// first, cancel the maybe future. Return the definitely output together with the maybe output if
-/// it wasn't cancelled.
-async fn join_maybe<Fut1: Future, Fut2: Future>(
-    definitely: Fut1,
-    maybe: Fut2,
-) -> (Fut1::Output, Option<Fut2::Output>) { ... }
+/// Run a "definitely" future and a "maybe" future concurrently. Wait for the definitely future to
+/// finish. If the maybe future is still pending at that point, cancel it. Return the definitely
+/// output together with the maybe output if it wasn't cancelled.
+async fn join_maybe<Definitely: Future, Maybe: Future>(
+    definitely: Definitely,
+    maybe: Maybe,
+) -> (Definitely::Output, Option<Maybe::Output>)
 ```
 
-Here's what our `main` function would look like using `join_maybe` instead of
-`select!` ([playground link][join_maybe]):
+Here's what the body of our `main` function would look like using `join_maybe`
+instead of `select!` ([playground link][join_maybe]):
 
-[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Afn+join_maybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E%28definitely%3A+Fut1%2C+maybe%3A+Fut2%29+-%3E+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%3A+Box%3A%3Apin%28definitely%29%2C%0A++++++++maybe%3A+Box%3A%3Apin%28MaybeDone%3A%3AFuture%28maybe%29%29%2C%0A++++%7D%0A%7D%0A%0Astruct+JoinMaybe%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+%7B%0A++++%2F%2F+%60pin_project_lite%60+isn%27t+available+on+the+Playground%2C+so+just+use+%60Pin%3CBox%3C_%3E%3E%60.%0A++++definitely%3A+Pin%3CBox%3CFut1%3E%3E%2C%0A++++maybe%3A+Pin%3CBox%3CMaybeDone%3CFut2%3E%3E%3E%2C%0A%7D%0A%0Aimpl%3CFut1%3A+Future%2C+Fut2%3A+Future%3E+Future+for+JoinMaybe%3CFut1%2C+Fut2%3E+%7B%0A++++type+Output+%3D+%28Fut1%3A%3AOutput%2C+Option%3CFut2%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28mut+self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+definitely_poll+%3D+self.definitely.as_mut%28%29.poll%28cx%29%3B%0A++++++++_+%3D+self.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+self.maybe.as_mut%28%29.take_output%28%29%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
+[join_maybe]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3AMaybeDone%3B%0Ause+pin_project_lite%3A%3Apin_project%3B%0Ause+std%3A%3Apin%3A%3APin%3B%0Ause+std%3A%3Atask%3A%3A%7BContext%2C+Poll%7D%3B%0Ause+tokio%3A%3Async%3A%3AMutex%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0Aasync+fn+foo%28%29+%7B%0A++++%2F%2F+Acquire+a+global+lock%2C+sleep+briefly%2C+and+release+it.%0A++++static+LOCK%3A+Mutex%3C%28%29%3E+%3D+Mutex%3A%3Aconst_new%28%28%29%29%3B%0A++++let+_guard+%3D+LOCK.lock%28%29.await%3B%0A++++sleep%28Duration%3A%3Afrom_millis%2810%29%29.await%3B%0A%7D%0A%0Aasync+fn+bar%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0Aasync+fn+baz%28%29+%7B%0A++++foo%28%29.await%3B%0A%7D%0A%0A%2F%2F%2F+Run+a+%22definitely%22+future+and+a+%22maybe%22+future+concurrently.+Wait+for+the+definitely+future+to%0A%2F%2F%2F+finish.+If+the+maybe+future+is+still+pending+at+that+point%2C+cancel+it.+Return+the+definitely%0A%2F%2F%2F+output+together+with+the+maybe+output+if+it+wasn%27t+cancelled.%0Afn+join_maybe%3CDefinitely%3A+Future%2C+Maybe%3A+Future%3E%28%0A++++definitely%3A+Definitely%2C%0A++++maybe%3A+Maybe%2C%0A%29+-%3E+JoinMaybe%3CDefinitely%2C+Maybe%3E+%7B%0A++++JoinMaybe+%7B%0A++++++++definitely%2C%0A++++++++maybe%3A+MaybeDone%3A%3AFuture%28maybe%29%2C%0A++++%7D%0A%7D%0A%0Apin_project%21+%7B%0A++++struct+JoinMaybe%3CDefinitely%3A+Future%2C+Maybe%3A+Future%3E+%7B%0A++++++++%23%5Bpin%5D%0A++++++++definitely%3A+Definitely%2C%0A++++++++%23%5Bpin%5D%0A++++++++maybe%3A+MaybeDone%3CMaybe%3E%2C%0A++++%7D%0A%7D%0A%0Aimpl%3CDefinitely%3A+Future%2C+Maybe%3A+Future%3E+Future+for+JoinMaybe%3CDefinitely%2C+Maybe%3E+%7B%0A++++type+Output+%3D+%28Definitely%3A%3AOutput%2C+Option%3CMaybe%3A%3AOutput%3E%29%3B%0A%0A++++fn+poll%28self%3A+Pin%3C%26mut+Self%3E%2C+cx%3A+%26mut+Context%29+-%3E+Poll%3CSelf%3A%3AOutput%3E+%7B%0A++++++++let+mut+this+%3D+self.project%28%29%3B%0A++++++++let+definitely_poll+%3D+this.definitely.poll%28cx%29%3B%0A++++++++_+%3D+this.maybe.as_mut%28%29.poll%28cx%29%3B%0A++++++++if+let+Poll%3A%3AReady%28definitely_output%29+%3D+definitely_poll+%7B%0A++++++++++++let+maybe_output+%3D+this.maybe.as_mut%28%29.take_output%28%29%3B%0A++++++++++++%2F%2F+NB%3A+The+strict+Future+contract+doesn%27t+currently+guarantee+that+our+caller+will+drop%0A++++++++++++%2F%2F+us+promptly+after+we+return+Ready%2C+so+if+the+maybe+future+is+still+pending%2C+we+need%0A++++++++++++%2F%2F+to+explicitly+cancel+it.%0A++++++++++++this.maybe.set%28MaybeDone%3A%3AGone%29%3B%0A++++++++++++Poll%3A%3AReady%28%28definitely_output%2C+maybe_output%29%29%0A++++++++%7D+else+%7B%0A++++++++++++Poll%3A%3APending%0A++++++++%7D%0A++++%7D%0A%7D%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++%2F%2F+While+%60bar%60+is+running%2C+call+%60baz%60+every+5+ms.%0A++++let+baz_loop+%3D+async+%7B%0A++++++++loop+%7B%0A++++++++++++sleep%28Duration%3A%3Afrom_millis%285%29%29.await%3B%0A++++++++++++println%21%28%22We+make+it+here...%22%29%3B%0A++++++++++++baz%28%29.await%3B%0A++++++++++++println%21%28%22...but+not+here%21%22%29%3B%0A++++++++%7D%0A++++%7D%3B%0A++++join_maybe%28bar%28%29%2C+baz_loop%29.await%3B%0A++++println%21%28%22...and+then+we+exit.%22%29%3B%0A%7D>
 
 ```rust
 // While `bar` is running, call `baz` every 5 ms.
@@ -782,10 +782,16 @@ struct AsyncLockGuard<'a, T> {
 ## Prior art
 [prior-art]: #prior-art
 
-- [Footgun lurking in `FuturesUnordered` and other concurrency-enabling streams](https://github.com/rust-lang/futures-rs/issues/2387)
+- [Footgun lurking in `FuturesUnordered` and other concurrency-enabling
+  streams](https://github.com/rust-lang/futures-rs/issues/2387)
 - [Barbara battles buffered streams][barbara]
-- [`for await` and the battle of buffered streams](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
-- [Future's liveness problem](https://skepfyr.me/blog/futures-liveness-problem/)
+- [`for await` and the battle of buffered
+  streams](https://tmandry.gitlab.io/blog/posts/for-await-buffered-streams/)
+- [Future's liveness
+  problem](https://skepfyr.me/blog/futures-liveness-problem/) - "If you call
+  `poll` and it returns `Poll::Pending`, when the waker you provided is woken
+  and the task is next polled, you must either call `poll` again or drop the
+  future."
 - [Futurelock]["Futurelock"]
 - [Never snooze a future][snooze]
 
@@ -836,10 +842,10 @@ time, there are published `Future` extension methods (e.g. [`delay`] from
 
 In practice we almost always drop futures as soon as they return `Ready`.
 `.await` expressions do that automatically, and combinators like `Join` often
-do the same using `Fuse` internally. However, this behavior isn't required by
-the contract, so it's problematic to rely on it for correctness. One place
-where we currently rely on it is [`Timeout`], which [looks like
-this][timeout_src]:
+do the same using `Fuse` or `MaybeDone` internally. However, this behavior
+isn't required by the contract, so it's problematic to rely on it for
+correctness. One place where we currently rely on it is [`Timeout`], which
+[looks like this][timeout_src]:
 
 [`Timeout`]: https://docs.rs/tokio/latest/tokio/time/fn.timeout.html
 [timeout_src]: https://github.com/tokio-rs/tokio/blob/tokio-1.53.3/tokio/src/time/timeout.rs#L176-L181
@@ -876,15 +882,14 @@ This example is especially subtle:
 2. The `timeout` expires after 5 ms, and polling it returns `Ready(Err(_))`.
 3. Normally `select!` would drop all its future arguments as soon as one of
    them is `Ready`. However, the `Ok(_)` pattern fails to match here, so
-   `select!` keeps polling the second arm. At least as of Tokio v1.53.3,
-   `select!` doesn't drop individual arms while others are still getting
-   polled.
+   `select!` keeps polling the second arm. As of Tokio v1.53.3, `select!` does
+   not drop individual arms while others are still getting polled.
 4. The `Timeout` future still holds the `bar` future, which still holds the
    `LOCK` guard, so the `baz` future is deadlocked.
 
-Maybe we'd like to change the behavior of `select!` in step #3,[^original_zip]
-but the key question here is whether `Timeout` can _assume_ that its callers
-will never behave like this. As written, the strict `Future` contract blames
+The behavior of `select!` in step #3 might be worth fixing,[^original_zip] but
+the key question here is whether `Timeout` can _assume_ that its callers will
+never behave like this. As written, the strict `Future` contract blames
 `Timeout` for this deadlock, because it stopped polling `bar` while it was
 still pending, without ensuring that it would get dropped promptly. We need to
 fix `Timeout` by wrapping `value` in an `Option` or similar and explicitly
@@ -917,28 +922,28 @@ require callers to drop futures that panic.
 We'll need to decide on a fix and implement it for [each of the broken patterns
 above][broken_patterns]. This RFC doesn't try to make those decisions, and many
 of the relevant APIs are in the crates ecosystem and not the standard library.
-However, there are two major issues that the standard library will need to
-address.
+However, there are two major issues that the standard library needs to address:
+the `Pin<&mut _>` blanket impl, and `AsyncIterator`.
 
 ### The `Pin<&mut _>` blanket impl for `Future`
 
 [That blanket impl][blanket] is at the heart of the
 [cancellation-by-reference][cancellation_by_reference] category of deadlocks.
-As the [Motivation][motivation] section mentioned, we can't deprecate that impl
-today, in part because `Pin<Box<_>>` needs to keep implementing `Future`. Maybe
-the impl could be split up using unstable specialization features internally,
-or maybe we could implement a more bespoke mechanism. The hard problem here
+As the [Motivation][motivation] section mentioned, we can't deprecate it today,
+in part because `Pin<Box<_>>` needs to keep implementing `Future`. Maybe the
+impl could be split up using unstable specialization features internally, or
+maybe we could implement a more bespoke mechanism. But the hard problem here
 isn't implementing the warning; it's rolling out new helper functions and
 macros that we can recommend to programmers when they see the warning.
 
-We need a wide variety of tools, both simple helper functions and fancier
-macros. We'll probably want `try_` versions that short-circuit with errors.
-We'll have to puzzle over [difficult cases][mini_redis] where we e.g. `select!`
-on a stream and also modify that stream in the `select!` arms. We'll bikeshed
-names for all of these things, and then we'll need to get some experience using
-them in production. Most of this work will be done in `futures-rs`, Tokio, and
-other ecosystem crates. Finally, we'll need to make a judgment call about when
-the new patterns are stable enough to deprecate the old ones.
+We'll need a variety of tools, both simple helper functions and fancier macros.
+We'll probably want `try_` versions that short-circuit with errors. We'll
+puzzle over [difficult cases][mini_redis] where we e.g. `select!` on a stream
+and also modify that stream in the `select!` arms. We'll bikeshed names for all
+of these things, and then we'll get some experience using them in production.
+Most of this work will be done in `futures-rs`, Tokio, and other ecosystem
+crates. Finally, we'll make a judgment call that the new patterns are stable
+enough to deprecate the old ones.
 
 ### `AsyncIterator`
 
@@ -948,9 +953,9 @@ See [RFC TODO][poll_progress_rfc].
 
 Here's a pie-in-the-sky idea.
 
-One of the reasons `select!` is widely used is that it can [work around borrow
-checker limitations][mini_redis]. Here's a `join` example that doesn't compile
-([playground link][join_error]):
+One of the reasons `select!` is widely used is that [it's a workaround for
+borrow checker limitations][mini_redis]. Here's a `join` example that doesn't
+compile ([playground link][join_error]):
 
 [join_error]: <https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&code=use+futures%3A%3Afuture%3A%3Ajoin%3B%0Ause+tokio%3A%3Atime%3A%3A%7BDuration%2C+sleep%7D%3B%0A%0A%23%5Btokio%3A%3Amain%5D%0Aasync+fn+main%28%29+%7B%0A++++let+mut+x+%3D+0%3B%0A++++let+fut1+%3D+async+%7B%0A++++++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++++++x+%2B%3D+1%3B%0A++++%7D%3B%0A++++let+fut2+%3D+async+%7B%0A++++++++sleep%28Duration%3A%3Afrom_secs%281%29%29.await%3B%0A++++++++x+%2B%3D+1%3B+%2F%2F+error%3A+cannot+borrow+%60x%60+as+mutable+more+than+once+at+a+time%0A++++%7D%3B%0A++++join%28fut1%2C+fut2%29.await%3B%0A++++assert_eq%21%28x%2C+2%29%3B%0A%7D>
 
@@ -993,7 +998,7 @@ Code like this is a pain to read and write. It uses `select!` to implement a
 non-obvious bits of macro syntax. And of course, it's prone to deadlocks, which
 is why this RFC wants to ban it. But these loops are surprisingly common in the
 wild, because they're one of the only ways to do concurrent mutation without
-locks or atomics. They work because the `select!` macro lowers all its `=>`
+interior mutability. They work because the `select!` macro lowers all its `=>`
 expressions to a single `match`, and the borrow checker can see that only one
 of the `match` arms runs.
 
@@ -1012,22 +1017,22 @@ await all {
 assert_eq!(x, 2);
 ```
 
-The key idea here is that, even though both of those arms mutate `x`, neither
-of them retains `&mut x` across a suspension point, so they don't conflict with
-each other. This wouldn't be sound if the two arms were independent futures
-that could escape to different threads, but in this syntax they're tied
+The key idea here is that, even though both of the arms here mutate `x`,
+neither of them retains `&mut x` across a suspension point, so they don't
+conflict with each other. This wouldn't be sound if the arms were independent
+futures that could escape to different threads, but in this syntax they're tied
 together. In effect, the whole `await all` expression borrows `x` once, and the
 individual arms reborrow `x` temporarily when they're polled. The borrow
 checker could verify that.
 
-The syntax bikeshedding for a feature like this would be intense, of course,
-but an interesting feature of `await all`...`and`\[...`and`\] is that it
-suggests a counterpart, `await any`...`or`\[...`or`\]. The former could have
-arms of different types, and it would evaluate to a tuple, while the latter
-would require arms of the same type, and it would evaluate to a single value.
-In other words, `await all` would be a built-in `join!`, and `await any` would
-be a built-in `select!`. `await any` could also allow conflicting _moves_ after
-the final suspension point in each arm, since only one arm would make it that
+Syntax bikeshedding for a feature like this would be intense, of course, but an
+interesting feature of `await all`...`and`\[...`and`\] is that it suggests a
+counterpart, `await any`...`or`\[...`or`\]. The former could have arms of
+different types, and it would evaluate to a tuple, while the latter would
+require arms of the same type, and it would evaluate to a single value. In
+other words, `await all` would be a built-in `join!`, and `await any` would be
+a built-in `select!`. `await any` could also allow conflicting _moves_ after
+the final suspension point in each arm, since only one arm can make it that
 far.
 
 Another upside of syntax like this would be better ergonomics for
