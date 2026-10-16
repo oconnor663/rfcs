@@ -184,7 +184,7 @@ cancelled futures promptly, then that impl is broken, and we should deprecate
 it. There's our warning in `main`.
 
 [^pin]: `pin!` is arguably also a red flag, but pinning per se doesn't have
-    anything to do with control flow or wakeups. We often manage heterogenous
+    anything to do with control flow or wakeups. We often manage heterogeneous
     futures with `Pin<Box<dyn Future>>`, and we can [abuse one of those][boxed]
     to replace `pin!` in this example.
 
@@ -262,12 +262,12 @@ impl<Fut: Future> Future for CoinFlip<Fut> {
 ```
 
 The problem is that `random()` might be true the first time, polling `inner`
-letting it register wakeups, but then it might be false the second time when
-one of those wakeups triggers, failing to poll `inner` promptly.[^first_time]
-This tends to cause hangs and deadlocks, not only in the future that didn't get
-polled (which we might've intended), but also in distant and unrelated futures
-that happen to use the same shared resources ([playground link][coin_flip]).
-`CoinFlip` would be at fault for those bugs.
+and letting it register wakeups, but then it might be false the second time
+when one of those wakeups triggers, failing to poll `inner`
+promptly.[^first_time] This tends to cause hangs and deadlocks, not only in the
+future that didn't get polled (which we might've intended), but also in distant
+and unrelated futures that happen to use the same shared resources ([playground
+link][coin_flip]). `CoinFlip` would be at fault for those bugs.
 
 [^first_time]: On the other hand, if `random` is false the first time, we might
     never poll `Fut`. Whether that's acceptable according to the `Future`
@@ -345,8 +345,8 @@ There are many functions, types, and patterns in async Rust today that can
 violate the strict `Future` contract. The following is an incomplete list of
 these with example deadlocks for each. This list gets its own section, because
 it's several things at once: it's a rationale (the problem is widespread), a
-drawback (fixing it will be a lot of churn), and  a catalog of future work
-(this RFC doesn't prescribe specific fixes).
+drawback (fixing it will be a lot of churn), and a catalog of future work (this
+RFC doesn't prescribe specific fixes).
 
 #### Cancellation by reference
 [cancellation_by_reference]: #cancellation-by-reference
@@ -539,7 +539,7 @@ baz().await; // Deadlock!
 ```
 
 Streams have a similar helper, [`poll_immediate`]
-([playground_link][poll_immediate_deadlock]):
+([playground link][poll_immediate_deadlock]):
 
 [`poll_immediate`]: https://docs.rs/futures/latest/futures/stream/fn.poll_immediate.html
 
@@ -661,7 +661,7 @@ loop {
 We'd like to factor out the `baz` loop into its own `async` block and run it
 concurrently, but we can't [`join`] that block with `bar`, because it never
 returns. One option here is to reorganize our `select!` to put the loop on the
-inside ([playgroud link][select_baz_loop]):[^cancellation_token]
+inside ([playground link][select_baz_loop]):[^cancellation_token]
 
 [`join`]: https://docs.rs/futures/latest/futures/future/fn.join.html
 

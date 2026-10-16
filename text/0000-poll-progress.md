@@ -190,10 +190,10 @@ sequence of events ([playground link][poll_progress_playground]):
     section](#implementing-asynciterator) and also the [discussion in the
     rationales](#why-not-allow-poll_progress-at-any-time).
 
-What we see in steps 2 and 6 is that, when control resumes in the body of `for
-await` loop, the loop doesn't know whether it was its body or its iterator (or
-both) that requested the wakeup. If the body finishes promptly, then the loop
-is going to call `poll_next` on the iterator to get the next item, so it
+What we see in steps 2 and 6 is that, when control resumes in the body of a
+`for await` loop, the loop doesn't know whether it was its body or its iterator
+(or both) that requested the wakeup. If the body finishes promptly, then the
+loop is going to call `poll_next` on the iterator to get the next item, so it
 doesn't matter who requested the wakeup. But if some future in the body is
 pending, then it might be a while before we call `poll_next`. In that case the
 loop needs to call `poll_progress` immediately, in case the current wakeup was
@@ -490,8 +490,7 @@ We execute the following steps:
    `PollNext::Pending`), suspending its state so that, when it's re-polled,
    execution returns to step 3.
 5. If the call to `poll_next` returns `PollNext::Done`, then the loop drops the
-   async iterator and evaluates to `()`. Drop the iterator and skip the
-   remaining steps.
+   async iterator and evaluates to `()`. Skip the remaining steps.
 6. If the call to `poll_next` returns `PollNext::Item(item)`, then `item` is
    matched against the irrefutable `PATTERN`.
 7. Control proceeds through the loop body, with the bindings from `PATTERN` in
@@ -1173,7 +1172,7 @@ approach might be better for consistency.
 ### Should we allow an indefinite delay between creation and polling?
 
 See the corresponding question in [RFC TODO][strict_future_rfc]. `Future` and
-`AsyncIterator` should presumbaly answer this question the same way.
+`AsyncIterator` should presumably answer this question the same way.
 
 ### Should we require callers to drop async iterators promptly after they're `Done`?
 
