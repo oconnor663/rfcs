@@ -409,16 +409,12 @@ other child streams until the next item is requested. Here we'll use [`merge`]
 for concurrency ([playground link][concurrent_for_each_deadlock]), but we could
 do the same thing with [`buffered`] streams ([playground
 link][buffered_deadlock]) or [`FuturesUnordered`] ([playground
-link][futures_unordered_deadlock]):[^unique][^fair]
+link][futures_unordered_deadlock]):[^fair]
 
 [`merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`for_each`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
-
-[^unique]: This is the only example in this section that could plausibly be
-    fixed internally, with no changes to the caller. See [RFC
-    TODO][poll_progress_rfc].
 
 [^fair]: Note that in this case (though not in any of the examples before
     this), the deadlock happens because the lock we're using is "fair". The
