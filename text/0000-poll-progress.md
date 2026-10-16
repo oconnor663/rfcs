@@ -904,7 +904,7 @@ behavior of that function to be *identical* to the `async gen fn` above.
 Consider the following implementation of `Map` ([playground
 link][playground_map]):
 
-[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=21c0e33940016f9b83f6c86ed5209b2d
+[playground_map]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=2a8abf235ae90b4661872bdd0d1c47f4
 
 ```rs
 struct Map<Iter, F> {
@@ -950,7 +950,7 @@ while its body is sleeping. If we want `Map` to behave exactly like the `async
 gen fn`, but we have to tolerate a "lazy" `Merge`, then `Map` also needs a
 `next_item_wanted` flag like this ([playground link][playground_map_lazy]):
 
-[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=936ab756fe85867c63118188a3854307
+[playground_map_lazy]: https://play.rust-lang.org/?version=stable&mode=debug&edition=2024&gist=491a04c7812478322bf7d08f0036cb4c
 
 ```rs
 struct Map<Iter, F, T> {
@@ -1177,6 +1177,11 @@ See the corresponding question in [RFC TODO][strict_future_rfc]. `Future` and
 ### Should we require callers to drop async iterators promptly after they're `Done`?
 
 Again see the corresponding question in [RFC TODO][strict_future_rfc].
+
+Note that the `Map` playground examples above ([\[1\]][playground_map],
+[\[2\]][playground_map_lazy]) include implementations of `Take` that drop their
+inner iterators internally to avoid relying on the caller to drop them promptly
+after `Done`. This will be easy for implementations to get wrong in practice.
 
 ## Future possibilities
 [future-possibilities]: #future-possibilities

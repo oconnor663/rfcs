@@ -893,9 +893,15 @@ never behave like this. As written, the strict `Future` contract blames
 `Timeout` for this deadlock, because it stopped polling `bar` while it was
 still pending, without ensuring that it would get dropped promptly. We need to
 fix `Timeout` by wrapping `value` in an `Option` or similar and explicitly
-clearing it in the cancelled case. Unfortunately, that's not compatible with
-existing public accessor methods like [`into_inner`], which don't currently
-return `Option`.
+clearing it in the cancelled case.[^join_maybe] Unfortunately, that's not
+compatible with existing public accessor methods like [`into_inner`], which
+don't currently return `Option`.
+
+[^join_maybe]: Note that [the `join_maybe` playground example
+    above][join_maybe] drops the `maybe` future internally to conform to this
+    rule. This is easy to get wrong in practice. On the other hand, as we see
+    with the current behavior of `select!`, a requirement to drop ready futures
+    promptly would also be easy to get wrong.
 
 [`into_inner`]: https://docs.rs/tokio/latest/tokio/time/struct.Timeout.html#method.into_inner
 
