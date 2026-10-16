@@ -931,16 +931,16 @@ of the relevant APIs are in the crates ecosystem and not the standard library.
 However, there are two major issues that the standard library needs to address:
 the `Pin<&mut _>` blanket impl, and `AsyncIterator`.
 
-### The `Pin<&mut _>` blanket impl for `Future`
+### `Future` blanket impls
 
-[That blanket impl][blanket] is at the heart of the
+[The `Pin<&mut _>` blanket impl][blanket] is at the heart of the
 [cancellation-by-reference][cancellation_by_reference] category of deadlocks.
 As the [Motivation][motivation] section mentioned, we can't deprecate it today,
 in part because `Pin<Box<_>>` needs to keep implementing `Future`. Maybe the
 impl could be split up using unstable specialization features internally, or
 maybe we could implement a more bespoke mechanism. But the hard problem here
-isn't implementing the warning; it's rolling out new helper functions and
-macros that we can recommend to programmers when they see the warning.
+isn't implementing a deprecation warning; it's rolling out new helper functions
+and macros that we can recommend to programmers who see that warning.
 
 We'll need a variety of tools, both simple helper functions and fancier macros.
 We'll probably want `try_` versions that short-circuit with errors. We'll
@@ -950,6 +950,14 @@ of these things, and then we'll get some experience using them in production.
 Most of this work will be done in `futures-rs`, Tokio, and other ecosystem
 crates. Finally, we'll make a judgment call that the new patterns are stable
 enough to deprecate the old ones.
+
+Note that [the blanket `Future` impl for unpinned `&mut`
+references][unpin_blanket] is also incorrect for the same reason as the pinned
+one. The `Unpin` bound makes it less relevant in practice, but in theory we
+could reproduce all the deadlocks above using `&mut Pin<Box<_>>` without ever
+instantiating a `Pin<&mut _>` reference ourselves.
+
+[unpin_blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-%26mut+F
 
 ### `AsyncIterator`
 
@@ -1001,10 +1009,10 @@ assert_eq!(x, 2);
 
 Code like this is a pain to read and write. It uses `select!` to implement a
 `join`, which is counterintuitive. It needs pinning, fusing, and a couple
-non-obvious bits of macro syntax. And of course, it's prone to deadlocks, which
-is why this RFC wants to ban it. But these loops are surprisingly common in the
-wild, because they're one of the only ways to do concurrent mutation without
-interior mutability. They work because the `select!` macro lowers all its `=>`
+non-obvious bits of macro syntax. Plus it's driving futures by reference, which
+this RFC wants to ban. But these loops are surprisingly common in the wild,
+because they're one of the only ways to do concurrent mutation without interior
+mutability. They work because the `select!` macro lowers all its `=>`
 expressions to a single `match`, and the borrow checker can see that only one
 of the `match` arms runs.
 
@@ -1038,16 +1046,16 @@ different types, and it would evaluate to a tuple, while the latter would
 require arms of the same type, and it would evaluate to a single value. In
 other words, `await all` would be a built-in `join!`, and `await any` would be
 a built-in `select!`. `await any` could also allow conflicting _moves_ after
-the final suspension point in each arm, since only one arm can make it that
+the final suspension point in each arm, since only one arm would make it that
 far.
 
 Another upside of syntax like this would be better ergonomics for
 short-circuiting. It's annoying to use `return` or `?` in an `async` block,
 because they only short-circuit the block, not the calling function. It's also
-impossible to `break` or `continue` a loop outside the block. With concurrency
-syntax, all of these could work naturally. An especially interesting
-possibility would be `yield`ing from concurrent blocks in an `async gen fn`,
-see [RFC TODO][poll_progress_rfc].
+impossible to `break` or `continue` a loop outside the block. With dedicated
+syntax, short-circuiting could work naturally. Another interesting possibility
+would be `yield`ing from concurrent blocks in an `async gen fn`, see [RFC
+TODO][poll_progress_rfc].
 
 [barbara]: https://rust-lang.github.io/wg-async/vision/submitted_stories/status_quo/barbara_battles_buffered_streams.html
 ["Futurelock"]: https://rfd.shared.oxide.computer/rfd/0609
