@@ -27,6 +27,10 @@ requirements, define a `PollNext<_>` enum for `poll_next` to return, replacing
 [for_await]: https://github.com/rust-lang/rust/issues/118898
 [gen_blocks]: https://github.com/rust-lang/rust/issues/117078
 
+To avoid burying the lede: Effectively deprecating [`StreamExt::next`] will
+probably be the most controversial part of this RFC. See ["What about
+`.next()`?"](#what-about-next) in the Drawbacks section.
+
 ## Motivation
 [motivation]: #motivation
 
@@ -227,8 +231,8 @@ input in a way that's compatible with async code.
 [`std::io::Lines`]: https://doc.rust-lang.org/std/io/struct.Lines.html
 [`std::sync::mpsc::Iter`]: https://doc.rust-lang.org/std/sync/mpsc/struct.Iter.html
 
-Unlike regular iterators, an `AsyncIterator` can do concurrent work while its
-caller is processing an item. For example:
+Unlike regular iterators, an `AsyncIterator` can also do concurrent work while
+its caller is processing an item. For example:
 
 ```rs
 for await jpeg in fetch_images() {
@@ -236,7 +240,7 @@ for await jpeg in fetch_images() {
 }
 ```
 
-Depending on how it's implemented, `fetch_images` could download the next
+Depending on how it's implemented, `fetch_images` could be downloading the next
 `jpeg` concurrently while `save_image` is running. A regular iterator could
 potentially do something like that by spawning a thread, but threads complicate
 borrowing and short-circuiting and usually require heap allocation. Async
@@ -294,7 +298,7 @@ states to contend with, `AsyncIterator` has _five_:
 | `poll_next` returned `PollNext::Pending` | You must call `poll_next` again at the next wakeup. <ins><strong>`poll_progress` is not allowed,</strong></ins> and it might panic or otherwise misbehave (within the bounds of safe code). |
 | `poll_next` returned `PollNext::Done` | You must not poll again. Either `poll_next` or `poll_progress` might panic or misbehave. |
 | `poll_progress` returned `Poll::Pending` | You can call `poll_next` whenever you want another item, otherwise you must call `poll_progress` again at the next wakeup. |
-| `poll_progress` returned `Poll::Ready` | No requirements. You can call `poll_next` whenever you want another item, or you can stop polling. `poll_progress` is still allowed but usually has no effect. |
+| `poll_progress` returned `Poll::Ready` | No requirements. You can call `poll_next` whenever you want another item, or you can stop polling. Further calls to `poll_progress` are allowed but usually have no effect. |
 
 When an `AsyncIterator` is first created, either `poll_next` or `poll_progress`
 is valid. Although a `for await` loop will always start by calling `poll_next`,
@@ -341,7 +345,7 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> PollNext<Iter::Item> {
         let this = self.project();
-        if let Some(item) = this.item.take() { // If we have a buffered `item`, return it.
+        if let Some(item) = this.item.take() { // If we have a buffered `item`, yield it.
             PollNext::Item(item)
         } else { // Otherwise poll the `inner` async iterator.
             this.inner.poll_next(cx)
@@ -368,14 +372,14 @@ impl<Iter: AsyncIterator> AsyncIterator for Buffer1<Iter> {
 
 Look at how `Buffer1::poll_next` returns the result of `inner.poll_next`
 directly, without doing any further polling. That might seem like it violates
-the "`PollNext::Item` rule" about polling again promptly, but it doesn't,
-because the same rule applies _to the caller_. The caller must poll again, and
-when they do, `inner` will get polled again. However, `Buffer1::poll_progress`
-doesn't impose the same requirements on its caller, so its `Item` branch needs
-to call `inner.poll_progress` explicitly. (It would also need to handle `Done`,
-but [`Fuse`] takes care of that.)
+the "`PollNext::Item` rule" about polling again promptly, however, the same
+rule applies _to the caller_. The caller must poll again, and when they do,
+`inner` will get polled again. However, `Buffer1::poll_progress` doesn't impose
+the same requirements on its caller, so its `Item` branch needs to call
+`inner.poll_progress` explicitly. (It would also need to handle `Done`, but
+[`Fuse`] takes care of that.)
 
-[`Fuse`]: https://docs.rs/futures/latest/futures/future/struct.Fuse.html
+[`Fuse`]: https://docs.rs/futures/latest/futures/stream/struct.Fuse.html
 
 Note also that `Buffer1::poll_progress` follows the "`PollNext::Pending` rule"
 and doesn't call `inner.poll_progress` after `inner.poll_next` returns
@@ -606,13 +610,10 @@ the first case `LOCK` has already invoked a `Waker`, and in the second case
 But who? The caller? What we're seeing is that, to satisfy the proposed
 contract, whatever's driving an `AsyncIterator` generally needs to _own_ it.
 That's the case with `for await` loops, and with terminal consumers like
-[`for_each`] and [`collect`], but it's a problem for `next`. This is loosely
-similar to the problems with [the blanket `Future` impl for `Pin<&mut _>`
-references][blanket] described in [RFC TODO][strict_future_rfc].
+[`for_each`] and [`collect`], but it's a problem for `next`.
 
 [`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
 [`collect`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.collect
-[blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
 Now, the alternatives. The most common use case for `next` today is loops like
 this:
@@ -702,8 +703,10 @@ example of how driving an `AsyncIterator` correctly requires _ownership_.
 `Pin<&mut _>` should not implement `AsyncIterator`, and this loop should not
 compile.
 
-Again see the discussion of [the blanket `Future` impl for `Pin<&mut _>`
+See also the discussion of [the blanket `Future` impl for `Pin<&mut _>`
 references][blanket] in [RFC TODO][strict_future_rfc].
+
+[blanket]: https://doc.rust-lang.org/std/future/trait.Future.html#impl-Future-for-Pin%3CP%3E
 
 ### What about "lending" async iterators?
 
