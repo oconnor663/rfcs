@@ -135,9 +135,9 @@ can also cause performance issues, timeout errors, and UI stuttering.
 
 Consider the deadlock problem from the perspective of a programmer writing
 `foo`. You're acquiring `LOCK`, and it's your responsibility not to hold it for
-too long. If you do any blocking IO while you hold it, you're trusting the
-runtime to trigger your wakeup correctly. That's fine; you naturally rely on
-the runtime for correctness, just like you rely on the standard library and the
+too long. If you wait on some IO while you hold it, you're trusting the runtime
+to trigger your wakeup correctly. That's fine; you naturally rely on the
+runtime for correctness, just like you rely on the standard library and the
 compiler. But then, you're also trusting your callers to deliver that wakeup.
 Is that fine? What if you're writing library code, and you don't know anything
 about your callers?[^spawn_task]
@@ -165,7 +165,7 @@ contract to make that clear.
 
 At the same time, if `main` is broken, we'd strongly prefer to have a warning
 or error telling us that. (There had better be a way to fix it too. See [the
-rationales section][fixing_main].) It's tempting to blame `select!`, since it's
+rationale section][fixing_main].) It's tempting to blame `select!`, since it's
 often found at the scene of these crimes. Could we get our warning in `main` by
 deprecating `select!`? In fact that's both too broad and also insufficient. We
 can produce similar deadlocks with any form of cancellation. Here's [a version
@@ -413,7 +413,6 @@ link][futures_unordered_deadlock]):[^fair]
 
 [`merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`buffered`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.buffered
-[`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`for_each`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
 
 [^fair]: Note that in this case (though not in any of the examples before
@@ -691,7 +690,7 @@ really capture our intent. It's also slightly awkward if we need the return
 value of `bar`.
 
 We could imagine a new helper function that fits this problem better.[^roll] It
-would drive two futures concurrently, but only wait for the first one to
+would drive two futures concurrently but only wait for its first argument to
 finish. Let's call it `join_maybe`:
 
 [^roll]: This helper isn't available in any widely-used library crates today,
@@ -921,6 +920,8 @@ require callers to drop futures that panic.
 ## Future work
 [future-work]: #future-work
 
+(No pun intended.)
+
 We'll need to decide on a fix and implement it for [each of the broken patterns
 above][broken_patterns]. This RFC doesn't try to make those decisions, and many
 of the relevant APIs are in the crates ecosystem and not the standard library.
@@ -959,9 +960,10 @@ instantiating a `Pin<&mut _>` reference ourselves.
 
 See [RFC TODO][poll_progress_rfc].
 
-### Concurrency syntax
+## Future possibilities
+[future-possibilities]: #future-possibilities
 
-Here's a pie-in-the-sky idea.
+### Concurrency syntax
 
 One of the reasons `select!` is widely used is that [it's a workaround for
 borrow checker limitations][mini_redis]. Here's a `join` example that doesn't

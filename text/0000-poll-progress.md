@@ -460,7 +460,7 @@ finished, we loop around and print `got B` immediately.
 ### `for await`
 
 We can't desugar this RFC's version of `for await` syntax into a loop ([like
-The Reference does for the `for` keyword][for]), because we'd need to treat the
+the reference does for the `for` keyword][for]), because we'd need to treat the
 body as a future (e.g. `async { /* loop body */ }`) to intercept `Pending` and
 call `poll_progress` in the right place, and that's incompatible with `return`,
 `?`, `break`, or `continue` in the body.
@@ -1072,8 +1072,8 @@ iterate, not to stop." Could the same be true of `AsyncIterator`?
 
 An important detail here is that `Iterator::try_fold` takes `&mut self`. In
 fact even if it didn't, there's a [blanket `Iterator` impl for `&mut _`
-references][iterator_blanket], which lets us call all of `Iterator`'s `self`
-methods from a mutable reference. But for all the reasons discussed above,
+references][iterator_blanket], which lets us call `Iterator`'s `self` methods
+from a mutable reference. But for all the reasons discussed above,
 `AsyncIterator` won't support iteration by reference. It won't be possible for
 `AsyncIterator` to implement `next` or `poll_next` in terms of `try_fold`.
 
@@ -1189,7 +1189,7 @@ after `Done`. This will be easy for implementations to get wrong in practice.
 ### Concurrency syntax
 
 [RFC TODO][strict_future_rfc] mentions dedicated concurrency syntax in its
-"Future Possibilities" section. It's interesting to consider how yielding from
+"future possibilities" section. It's interesting to consider how yielding from
 concurrent blocks might work in that syntax:
 
 ```rs
