@@ -194,14 +194,14 @@ sequence of events ([playground link][poll_progress_playground]):
     section](#implementing-asynciterator) and also the [discussion in the
     rationales](#why-not-allow-poll_progress-at-any-time).
 
-What we see in steps 2 and 6 is that, when control resumes in the body of a
-`for await` loop, the loop doesn't know whether it was its body or its iterator
-(or both) that requested the wakeup. If the body finishes promptly, then the
-loop is going to call `poll_next` on the iterator to get the next item, so it
-doesn't matter who requested the wakeup. But if some future in the body is
-pending, then it might be a while before we call `poll_next`. In that case the
-loop needs to call `poll_progress` immediately, in case the current wakeup was
-triggered by the iterator.
+Expanding on steps 2 and 6 above: When control resumes in the body of a `for
+await` loop, we don't know if it was the body or the iterator (or both) that
+requested the current wakeup, so we need to poll both of them. If control
+reaches the end of the body immediately, then we'll proceed to the next loop
+iteration and call `poll_next` immediately, which is good enough. But if some
+future in the body returns `Pending`, then we need to call `poll_progress` "on
+the way out" before returning `Pending` to our own caller, in case it was the
+iterator that requested the current wakeup.
 
 At a high level, `poll_progress` satisfies the "strict" `Future` contract and
 provides a steady control flow guarantee for code running inside an
