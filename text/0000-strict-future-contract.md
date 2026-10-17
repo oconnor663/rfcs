@@ -863,8 +863,8 @@ This example is especially subtle:
    them is `Ready`. However, the `Ok(_)` pattern fails to match here, so
    `select!` keeps polling the second arm. As of Tokio v1.53.3, `select!` does
    not drop individual arms while others are still getting polled.
-4. The `Timeout` future still holds the `bar` future, which still holds the
-   `LOCK` guard, so the `baz` future is deadlocked.
+4. As we discussed above, `Timeout` still holds the `bar` future, which still
+   holds the `LOCK` guard, so the `baz` future is deadlocked.
 
 [biased]: https://docs.rs/tokio/1.53.3/tokio/macro.select.html#fairness
 
