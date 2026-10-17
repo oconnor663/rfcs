@@ -1302,4 +1302,4 @@ need a way to come up with input values, which might be possible in some cases
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 [snooze]: https://jacko.io/snooze.html
-[strict_future_rfc]: ./0000-future-contract.md
+[strict_future_rfc]: ./0000-strict-future-contract.md
