@@ -38,7 +38,7 @@ Since the `AsyncIterator` trait is still unstable, iteration in the async
 ecosystem today is organized around the [`Stream`] trait from the `futures`
 crate. Apart from the name, the two traits currently have the same shape:
 
-[`Stream`]: https://docs.rs/futures/latest/futures/prelude/trait.Stream.html
+[`Stream`]: https://docs.rs/futures/latest/futures/stream/trait.Stream.html
 
 ```rs
 pub trait AsyncIterator { // or `pub trait Stream`
@@ -612,7 +612,7 @@ contract, whatever's driving an `AsyncIterator` generally needs to _own_ it.
 That's the case with `for await` loops, and with terminal consumers like
 [`for_each`] and [`collect`], but it's a problem for `next`.
 
-[`for_each`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.for_each
+[`for_each`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.for_each
 [`collect`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.collect
 
 Now, the alternatives. The most common use case for `next` today is loops like
@@ -1298,7 +1298,7 @@ need a way to come up with input values, which might be possible in some cases
 [`FuturesUnordered`]: https://docs.rs/futures/latest/futures/stream/struct.FuturesUnordered.html
 [`Merge`]: https://docs.rs/tokio-stream/latest/tokio_stream/trait.StreamExt.html#method.merge
 [`Chain`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.chain
-[`StreamExt::next`]: https://docs.rs/futures/latest/futures/prelude/stream/trait.StreamExt.html#method.next
+[`StreamExt::next`]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html#method.next
 [`StreamMap`]: https://docs.rs/tokio-stream/latest/tokio_stream/struct.StreamMap.html
 [mini_redis]: https://smallcultfollowing.com/babysteps/blog/2022/06/13/async-cancellation-a-case-study-of-pub-sub-in-mini-redis/
 [snooze]: https://jacko.io/snooze.html
